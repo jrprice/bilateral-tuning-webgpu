@@ -1,0 +1,19 @@
+{
+  "name": "bilateral-tuning-webgpu",
+  "version": "0.1.0",
+  "description": "A highly tunable bilateral filter using WebGPU",
+  "devDependencies": {
+    "typescript": "^4.4.3"
+  },
+  "main": "src/bilateral.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jrprice/bilateral-tuning-webgpu.git"
+  },
+  "author": "",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/jrprice/bilateral-tuning-webgpu/issues"
+  },
+  "homepage": "https://github.com/jrprice/bilateral-tuning-webgpu#readme"
+}
