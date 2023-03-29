@@ -78,6 +78,15 @@ async function LoadInputImage() {
   // Reconfigure the other canvases to clear and resize them.
   GetCanvasTexture("output_canvas");
 
+  // Clear the reference canvases and data.
+  function ClearCanvas(id: string) {
+    const canvas = <HTMLCanvasElement>document.getElementById(id);
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").clearRect(0, 0, width, height);
+  }
+  ClearCanvas("reference_canvas");
+  ClearCanvas("diff_canvas");
   reference_data = null;
 
   SetStatus("Ready.");
