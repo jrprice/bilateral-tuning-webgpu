@@ -24,26 +24,29 @@
     <br />
     <br />
 
-    <div style="display: table; width: 100%">
-      <div style="display: table-row">
-        <div style="display: table-cell">
-          Input
+    <table>
+      <tr>
+        <td style="vertical-align: top">
+          <b>Shader</b>
           <br />
-          <canvas
-            id="input_canvas"
-            style="width: 100%; max-width: 800px"
-          ></canvas>
-        </div>
-        <div style="width: 10px"></div>
-        <div style="display: table-cell">
-          Output
+          <textarea
+            id="shader"
+            wrap="off"
+            style="max-width: 800px"
+            readonly
+          ></textarea>
+        </td>
+        <td style="vertical-align: top; width: 100%">
+          <b>Input</b>
           <br />
-          <canvas
-            id="output_canvas"
-            style="width: 100%; max-width: 800px"
-          ></canvas>
-        </div>
-      </div>
-    </div>
+          <canvas id="input_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Output</b>
+          <br />
+          <canvas id="output_canvas" style="width: 100%"></canvas>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

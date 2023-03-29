@@ -161,8 +161,7 @@ const Run = async () => {
 
 /// Generate the WGSL shader.
 function GenerateShader(): string {
-  return `
-struct Parameters {
+  const wgsl = `struct Parameters {
   inv_sigma_domain: f32,
   inv_sigma_range: f32,
   radius: i32,
@@ -209,6 +208,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let result = vec4f(sum.xyz / coeff, center_value.w);
   textureStore(output, center, result);
 }`;
+
+  // Display the shader.
+  const shader_display = document.getElementById("shader");
+  shader_display.textContent = wgsl;
+  shader_display.style.width = `${shader_display.scrollWidth}px`;
+  shader_display.style.height = `${shader_display.scrollHeight}px`;
+  return wgsl;
 }
 
 /// Display the result in the output canvas.
@@ -278,6 +284,9 @@ await InitWebGPU();
 
 // Load the default input image.
 LoadInputImage();
+
+// Display the default shader.
+GenerateShader();
 
 // Add an event handler for the 'Run' button.
 document.querySelector("#run").addEventListener("click", Run);
