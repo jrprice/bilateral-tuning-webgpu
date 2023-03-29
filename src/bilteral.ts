@@ -1,34 +1,85 @@
-// TODO: Make the size configurable.
-const kWidth = 4096;
-const kHeight = 4096;
+export {};
 
 // The input image data.
-const input_data = new Uint8Array(kWidth * kHeight * 4);
+let width: number;
+let height: number;
+let input_bitmap: ImageBitmap;
+
+// WebGPU objects.
+let adapter: GPUAdapter;
+let device: GPUDevice;
+
+/// Initialize the main WebGPU objects.
+async function InitWebGPU() {
+  // Initialize the WebGPU device and queue.
+  adapter = await navigator.gpu.requestAdapter();
+  device = await adapter.requestDevice();
+}
+
+/// Get the texture for the canvas called `id`.
+function GetCanvasTexture(id: string) {
+  const canvas = <HTMLCanvasElement>document.getElementById(id);
+  canvas.width = width;
+  canvas.height = height;
+  const canvas_context = canvas.getContext("webgpu");
+  canvas_context.configure({
+    device,
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  return canvas_context.getCurrentTexture();
+}
+
+/// Load the currently selected input image and display it to the input canvas.
+async function LoadInputImage() {
+  // Load the input image from file.
+  const image_selector = <HTMLSelectElement>(
+    document.getElementById("image_file")
+  );
+  const filename = image_selector.selectedOptions[0].value;
+  const response = await fetch(`dist/${filename}.jpg`);
+  const blob = await response.blob();
+  input_bitmap = await createImageBitmap(blob);
+  width = input_bitmap.width;
+  height = input_bitmap.height;
+
+  // Display the input image to the input canvas.
+  let input_canvas = GetCanvasTexture("input_canvas");
+  device.queue.copyExternalImageToTexture(
+    { source: input_bitmap },
+    { texture: input_canvas },
+    { width, height }
+  );
+
+  // Reconfigure the output canvas to clear it and resize it.
+  GetCanvasTexture("output_canvas");
+}
 
 /// Run the benchmark.
 const Run = async () => {
-  // Initialize the WebGPU device and queue.
-  const adapter = await navigator.gpu.requestAdapter();
-  const device = await adapter.requestDevice();
-
   // Create the input and output textures.
   const input = device.createTexture({
-    size: { width: kWidth, height: kHeight },
+    size: { width, height },
     format: "rgba8unorm",
-    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+    usage:
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.TEXTURE_BINDING |
+      GPUTextureUsage.RENDER_ATTACHMENT,
   });
   const output = device.createTexture({
-    size: { width: kWidth, height: kHeight },
+    size: { width, height },
     format: "rgba8unorm",
-    usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING,
+    usage:
+      GPUTextureUsage.COPY_SRC |
+      GPUTextureUsage.STORAGE_BINDING |
+      GPUTextureUsage.TEXTURE_BINDING,
   });
 
-  // Copy the input data to the input texture.
-  device.queue.writeTexture(
+  // Copy the input image to the input texture.
+  device.queue.copyExternalImageToTexture(
+    { source: input_bitmap },
     { texture: input },
-    input_data,
-    { bytesPerRow: kWidth * 4 },
-    { width: kWidth, height: kHeight }
+    { width, height }
   );
 
   // Set up the filter parameters.
@@ -44,8 +95,8 @@ const Run = async () => {
   param_values_f32[0] = 1.0 / 3.0;
   param_values_f32[1] = 1.0 / 0.2;
   param_values_u32[2] = 2;
-  param_values_u32[3] = kWidth;
-  param_values_u32[4] = kHeight;
+  param_values_u32[3] = width;
+  param_values_u32[4] = height;
   parameters.unmap();
 
   // Generate the shader and create the compute pipeline.
@@ -85,7 +136,7 @@ const Run = async () => {
     pass.setBindGroup(1, bind_group_1);
     for (let i = 0; i < n; i++) {
       // TODO: Handle width and height not divisible by the workgroup size.
-      pass.dispatchWorkgroups(kWidth / 16, kHeight / 16);
+      pass.dispatchWorkgroups(width / 16, height / 16);
     }
     pass.end();
     device.queue.submit([commands.finish()]);
@@ -103,7 +154,7 @@ const Run = async () => {
   const elapsed = end - start;
   console.log(`Elapsed time: ${elapsed.toFixed(2)}ms`);
 
-  console.log('Finished.');
+  DisplayResult(output);
 
   // TODO: Verify the result.
 };
@@ -112,31 +163,36 @@ const Run = async () => {
 function GenerateShader(): string {
   return `
 struct Parameters {
-  inv_sigma_domain : f32,
-  inv_sigma_range : f32,
-  radius : i32,
-  width : u32,
-  height : u32,
+  inv_sigma_domain: f32,
+  inv_sigma_range: f32,
+  radius: i32,
+  width: u32,
+  height: u32,
 }
 
-@group(0) @binding(0) var input : texture_2d<f32>;
-@group(0) @binding(1) var output : texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var input_sampler : sampler;
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var input_sampler: sampler;
 
-@group(1) @binding(0) var<uniform> params : Parameters;
+@group(1) @binding(0) var<uniform> params: Parameters;
 
 @compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let center = vec2i(gid.xy);
-  let center_value = textureSampleLevel(input, input_sampler, vec2f(center), 0);
+  let center_norm = vec2f(center) / vec2f(f32(params.width), f32(params.height));
+  let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);
+  let dx = 1.f / f32(params.width);
+  let dy = 1.f / f32(params.height);
 
   var coeff = 0.f;
   var sum = vec4f();
-  for (var j = -params.radius; j <= params.radius; j++) {
-    for (var i = -params.radius; i <= params.radius; i++) {
-      var norm : f32;
-      var weight : f32;
-      let pixel = textureSampleLevel(input, input_sampler, vec2f(center + vec2i(i,j)), 0);
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      var norm = 0.f;
+      var weight = 0.f;
+
+      let coord = center_norm + vec2f(f32(i) * dx, f32(j) * dy);
+      let pixel = textureSampleLevel(input, input_sampler, coord, 0);
 
       norm    = sqrt(f32(i*i) + f32(j*j)) * params.inv_sigma_domain;
       weight  = -0.5f * (norm * norm);
@@ -146,7 +202,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
       weight = exp(weight);
       coeff += weight;
-      sum   += weight*pixel;
+      sum   += weight * pixel;
     }
   }
 
@@ -155,21 +211,78 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }`;
 }
 
-/// Initialize the input image data.
-function InitImage(input_data: Uint8Array) {
-  // Generate a random image.
-  for (let y = 0; y < kHeight; y++) {
-    for (let x = 0; x < kWidth; x++) {
-      input_data[(x + y * kWidth) * 4 + 0] = Math.random() * 255;
-      input_data[(x + y * kWidth) * 4 + 1] = Math.random() * 255;
-      input_data[(x + y * kWidth) * 4 + 2] = Math.random() * 255;
-      input_data[(x + y * kWidth) * 4 + 3] = 255;
-    }
-  }
+/// Display the result in the output canvas.
+function DisplayResult(result: GPUTexture) {
+  const module = device.createShaderModule({
+    code: `
+@vertex
+fn vert_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4f {
+  const kVertices = array(
+    vec2f(-1, -1),
+    vec2f(-1,  1),
+    vec2f( 1, -1),
+    vec2f(-1,  1),
+    vec2f( 1, -1),
+    vec2f( 1,  1),
+  );
+  return vec4f(kVertices[idx], 0, 1);
 }
 
-// Initialize the input data.
-InitImage(input_data);
+@group(0) @binding(0) var image: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
 
-// Add an event handler for the "Run" button.
+@fragment
+fn frag_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
+  return textureSampleLevel(image, s, position.xy / vec2f(${width}, ${height}), 0);
+}
+  `,
+  });
+  const pipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { entryPoint: "vert_main", module },
+    fragment: {
+      entryPoint: "frag_main",
+      module,
+      targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }],
+    },
+  });
+
+  const commands = device.createCommandEncoder();
+  const pass = commands.beginRenderPass({
+    colorAttachments: [
+      {
+        view: GetCanvasTexture("output_canvas").createView(),
+        loadOp: "clear",
+        storeOp: "store",
+      },
+    ],
+  });
+  pass.setBindGroup(
+    0,
+    device.createBindGroup({
+      entries: [
+        { binding: 0, resource: result.createView() },
+        { binding: 1, resource: device.createSampler() },
+      ],
+      layout: pipeline.getBindGroupLayout(0),
+    })
+  );
+  pass.setPipeline(pipeline);
+  pass.draw(6);
+  pass.end();
+  device.queue.submit([commands.finish()]);
+}
+
+// Initialize WebGPU.
+await InitWebGPU();
+
+// Load the default input image.
+LoadInputImage();
+
+// Add an event handler for the 'Run' button.
 document.querySelector("#run").addEventListener("click", Run);
+
+// Add an event handler for the image selector.
+document.querySelector("#image_file").addEventListener("change", () => {
+  LoadInputImage();
+});

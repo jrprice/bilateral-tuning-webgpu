@@ -1,2 +1,4 @@
-dist/
+dist/*.js
 node_modules/
+.DS_Store
+*.code-workspace

@@ -13,6 +13,37 @@
 
     <br />
     <br />
+    <select name="image_file" id="image_file" style="font-size: 80%">
+      <option value="vik-beach-256x256">Vik Beach (256x256)</option>
+      <option value="vik-beach-2000x1500">Vik Beach (2000x1500)</option>
+      <option value="vik-beach-4096x4096" selected="selected">
+        Vik Beach (4096x4096)
+      </option>
+    </select>
     <button id="run">Run</button>
+    <br />
+    <br />
+
+    <div style="display: table; width: 100%">
+      <div style="display: table-row">
+        <div style="display: table-cell">
+          Input
+          <br />
+          <canvas
+            id="input_canvas"
+            style="width: 100%; max-width: 800px"
+          ></canvas>
+        </div>
+        <div style="width: 10px"></div>
+        <div style="display: table-cell">
+          Output
+          <br />
+          <canvas
+            id="output_canvas"
+            style="width: 100%; max-width: 800px"
+          ></canvas>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
