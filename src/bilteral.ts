@@ -1,17 +1,31 @@
 export {};
 
+// The filter parameters.
+// TODO: Make the parameters configurable.
+let sigma_domain = 3.0;
+let sigma_range = 0.2;
+let radius = 2;
+
 // The input image data.
 let width: number;
 let height: number;
-let input_bitmap: ImageBitmap;
+
+// The reference result.
+let reference_data: Uint8Array = null;
 
 // WebGPU objects.
 let adapter: GPUAdapter;
 let device: GPUDevice;
+let input_image_staging: GPUTexture;
+
+function SetStatus(str: string) {
+  document.getElementById("status").textContent = str;
+}
 
 /// Initialize the main WebGPU objects.
 async function InitWebGPU() {
   // Initialize the WebGPU device and queue.
+  SetStatus("Initializing...");
   adapter = await navigator.gpu.requestAdapter();
   device = await adapter.requestDevice();
 }
@@ -32,55 +46,71 @@ function GetCanvasTexture(id: string) {
 
 /// Load the currently selected input image and display it to the input canvas.
 async function LoadInputImage() {
+  SetStatus("Loading input image...");
+
   // Load the input image from file.
-  const image_selector = <HTMLSelectElement>(
-    document.getElementById("image_file")
-  );
+  const image_selector = <HTMLSelectElement>document.getElementById("image_file");
   const filename = image_selector.selectedOptions[0].value;
   const response = await fetch(`dist/${filename}.jpg`);
   const blob = await response.blob();
-  input_bitmap = await createImageBitmap(blob);
+  const input_bitmap = await createImageBitmap(blob);
   width = input_bitmap.width;
   height = input_bitmap.height;
 
-  // Display the input image to the input canvas.
-  let input_canvas = GetCanvasTexture("input_canvas");
+  // Copy the input image to a staging texture.
+  input_image_staging = device.createTexture({
+    format: "rgba8unorm",
+    size: { width, height },
+    usage:
+      GPUTextureUsage.COPY_SRC |
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.RENDER_ATTACHMENT |
+      GPUTextureUsage.TEXTURE_BINDING,
+  });
   device.queue.copyExternalImageToTexture(
     { source: input_bitmap },
-    { texture: input_canvas },
+    { texture: input_image_staging },
     { width, height }
   );
 
-  // Reconfigure the output canvas to clear it and resize it.
+  DisplayTexture(input_image_staging, "input_canvas");
+
+  // Reconfigure the other canvases to clear and resize them.
   GetCanvasTexture("output_canvas");
+
+  reference_data = null;
+
+  SetStatus("Ready.");
 }
 
 /// Run the benchmark.
 const Run = async () => {
+  SetStatus("Setting up...");
+
   // Create the input and output textures.
   const input = device.createTexture({
     size: { width, height },
     format: "rgba8unorm",
-    usage:
-      GPUTextureUsage.COPY_DST |
-      GPUTextureUsage.TEXTURE_BINDING |
-      GPUTextureUsage.RENDER_ATTACHMENT,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
   });
   const output = device.createTexture({
     size: { width, height },
     format: "rgba8unorm",
     usage:
-      GPUTextureUsage.COPY_SRC |
-      GPUTextureUsage.STORAGE_BINDING |
-      GPUTextureUsage.TEXTURE_BINDING,
+      GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
   });
 
   // Copy the input image to the input texture.
-  device.queue.copyExternalImageToTexture(
-    { source: input_bitmap },
+  const commands = device.createCommandEncoder();
+  commands.copyTextureToTexture(
+    { texture: input_image_staging },
     { texture: input },
-    { width, height }
+    {
+      width,
+      height,
+    }
   );
+  device.queue.submit([commands.finish()]);
 
   // Set up the filter parameters.
   const parameters = device.createBuffer({
@@ -91,10 +121,9 @@ const Run = async () => {
   const param_values = parameters.getMappedRange();
   const param_values_f32 = new Float32Array(param_values);
   const param_values_u32 = new Uint32Array(param_values);
-  // TODO: Make the parameters configurable.
-  param_values_f32[0] = 1.0 / 3.0;
-  param_values_f32[1] = 1.0 / 0.2;
-  param_values_u32[2] = 2;
+  param_values_f32[0] = 1.0 / sigma_domain;
+  param_values_f32[1] = 1.0 / sigma_range;
+  param_values_u32[2] = radius;
   param_values_u32[3] = width;
   param_values_u32[4] = height;
   parameters.unmap();
@@ -127,6 +156,10 @@ const Run = async () => {
     layout: pipeline.getBindGroupLayout(1),
   });
 
+  // TODO: Make workgroup size configurable.
+  const group_count_x = Math.floor((width + 15) / 16);
+  const group_count_y = Math.floor((height + 15) / 16);
+
   // Helper to enqueue `n` back-to-back runs of the shader.
   function Enqueue(n: number) {
     const commands = device.createCommandEncoder();
@@ -135,8 +168,7 @@ const Run = async () => {
     pass.setBindGroup(0, bind_group_0);
     pass.setBindGroup(1, bind_group_1);
     for (let i = 0; i < n; i++) {
-      // TODO: Handle width and height not divisible by the workgroup size.
-      pass.dispatchWorkgroups(width / 16, height / 16);
+      pass.dispatchWorkgroups(group_count_x, group_count_y);
     }
     pass.end();
     device.queue.submit([commands.finish()]);
@@ -147,16 +179,20 @@ const Run = async () => {
   await device.queue.onSubmittedWorkDone();
 
   // Timed runs.
+  SetStatus("Running...");
+  const itrs = 100;
   const start = performance.now();
-  Enqueue(100);
+  Enqueue(itrs);
   await device.queue.onSubmittedWorkDone();
   const end = performance.now();
   const elapsed = end - start;
-  console.log(`Elapsed time: ${elapsed.toFixed(2)}ms`);
+  const per_frame = elapsed / itrs;
+  const perf_str = `Elapsed time: ${elapsed.toFixed(2)} ms (${per_frame.toFixed(2)} ms/frame)`;
+  document.getElementById("runtime").textContent = perf_str;
 
-  DisplayResult(output);
+  DisplayTexture(output, "output_canvas");
 
-  // TODO: Verify the result.
+  VerifyResult(output);
 };
 
 /// Generate the WGSL shader.
@@ -177,20 +213,18 @@ function GenerateShader(): string {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let center = vec2i(gid.xy);
-  let center_norm = vec2f(center) / vec2f(f32(params.width), f32(params.height));
-  let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);
-  let dx = 1.f / f32(params.width);
-  let dy = 1.f / f32(params.height);
+  let step = vec2f(1.f / f32(params.width), 1.f / f32(params.height));
+  let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
+  let center_value = textureSampleLevel(input, input_sampler, center, 0);
 
   var coeff = 0.f;
   var sum = vec4f();
-  for (var j = -1; j <= 1; j++) {
-    for (var i = -1; i <= 1; i++) {
+  for (var j = -params.radius; j <= params.radius; j++) {
+    for (var i = -params.radius; i <= params.radius; i++) {
       var norm = 0.f;
       var weight = 0.f;
 
-      let coord = center_norm + vec2f(f32(i) * dx, f32(j) * dy);
+      let coord = center + (vec2f(f32(i), f32(j)) * step);
       let pixel = textureSampleLevel(input, input_sampler, coord, 0);
 
       norm    = sqrt(f32(i*i) + f32(j*j)) * params.inv_sigma_domain;
@@ -206,19 +240,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let result = vec4f(sum.xyz / coeff, center_value.w);
-  textureStore(output, center, result);
+  if (all(gid.xy < vec2u(params.width, params.height))) {
+    textureStore(output, gid.xy, result);
+  }
 }`;
 
   // Display the shader.
   const shader_display = document.getElementById("shader");
+  shader_display.style.width = `0px`;
+  shader_display.style.height = `0px`;
   shader_display.textContent = wgsl;
   shader_display.style.width = `${shader_display.scrollWidth}px`;
   shader_display.style.height = `${shader_display.scrollHeight}px`;
   return wgsl;
 }
 
-/// Display the result in the output canvas.
-function DisplayResult(result: GPUTexture) {
+/// Display a texture to a canvas.
+function DisplayTexture(texture: GPUTexture, canvas_id: string) {
   const module = device.createShaderModule({
     code: `
 @vertex
@@ -257,7 +295,7 @@ fn frag_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
   const pass = commands.beginRenderPass({
     colorAttachments: [
       {
-        view: GetCanvasTexture("output_canvas").createView(),
+        view: GetCanvasTexture(canvas_id).createView(),
         loadOp: "clear",
         storeOp: "store",
       },
@@ -267,7 +305,7 @@ fn frag_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
     0,
     device.createBindGroup({
       entries: [
-        { binding: 0, resource: result.createView() },
+        { binding: 0, resource: texture.createView() },
         { binding: 1, resource: device.createSampler() },
       ],
       layout: pipeline.getBindGroupLayout(0),
@@ -279,11 +317,176 @@ fn frag_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
   device.queue.submit([commands.finish()]);
 }
 
+/// Display image data to a canvas from a Uint8Array.
+function DisplayImageData(data: Uint8Array, canvas_id: string) {
+  const imgdata = new ImageData(new Uint8ClampedArray(data), width, height);
+  const canvas = <HTMLCanvasElement>document.getElementById(canvas_id);
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").putImageData(imgdata, 0, 0);
+}
+
+/// Generate the reference result on the CPU.
+async function GenerateReferenceResult() {
+  if (reference_data) {
+    return;
+  }
+
+  SetStatus("Generating reference result...");
+
+  const row_stride = Math.floor((width + 255) / 256) * 256;
+
+  // Create a staging buffer for copying the image to the CPU.
+  const buffer = device.createBuffer({
+    size: row_stride * height * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+
+  // Copy the input image to the staging buffer.
+  const commands = device.createCommandEncoder();
+  commands.copyTextureToBuffer(
+    { texture: input_image_staging },
+    { buffer, bytesPerRow: row_stride * 4 },
+    {
+      width,
+      height,
+    }
+  );
+  device.queue.submit([commands.finish()]);
+  await buffer.mapAsync(GPUMapMode.READ);
+  const input_data = new Uint8Array(buffer.getMappedRange());
+
+  // Generate the reference output.
+  reference_data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const center_x = input_data[(x + y * row_stride) * 4 + 0] / 255.0;
+      const center_y = input_data[(x + y * row_stride) * 4 + 1] / 255.0;
+      const center_z = input_data[(x + y * row_stride) * 4 + 2] / 255.0;
+      const center_w = input_data[(x + y * row_stride) * 4 + 3];
+
+      let coeff = 0.0;
+      let sum = [0, 0, 0];
+      for (let j = -radius; j <= radius; j++) {
+        for (let i = -radius; i <= radius; i++) {
+          let xi = Math.min(Math.max(x + i, 0), width - 1);
+          let yj = Math.min(Math.max(y + j, 0), height - 1);
+          let pixel_x = input_data[(xi + yj * row_stride) * 4 + 0] / 255.0;
+          let pixel_y = input_data[(xi + yj * row_stride) * 4 + 1] / 255.0;
+          let pixel_z = input_data[(xi + yj * row_stride) * 4 + 2] / 255.0;
+
+          let norm;
+          let weight;
+
+          norm = Math.sqrt(i * i + j * j) / sigma_domain;
+          weight = -0.5 * (norm * norm);
+
+          let dist_x = pixel_x - center_x;
+          let dist_y = pixel_y - center_y;
+          let dist_z = pixel_z - center_z;
+          norm = Math.sqrt(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z) / sigma_range;
+          weight += -0.5 * (norm * norm);
+
+          weight = Math.exp(weight);
+          coeff += weight;
+          sum[0] += weight * pixel_x;
+          sum[1] += weight * pixel_y;
+          sum[2] += weight * pixel_z;
+        }
+      }
+      reference_data[(x + y * width) * 4 + 0] = (sum[0] / coeff) * 255.0;
+      reference_data[(x + y * width) * 4 + 1] = (sum[1] / coeff) * 255.0;
+      reference_data[(x + y * width) * 4 + 2] = (sum[2] / coeff) * 255.0;
+      reference_data[(x + y * width) * 4 + 3] = center_w;
+    }
+  }
+
+  buffer.unmap();
+
+  DisplayImageData(reference_data, "reference_canvas");
+}
+
+/// Verify a result against the reference result.
+async function VerifyResult(output: GPUTexture) {
+  // Generate the reference result.
+  await GenerateReferenceResult();
+
+  SetStatus("Verifying result...");
+
+  const row_stride = Math.floor((width + 255) / 256) * 256;
+
+  // Create a staging buffer for copying the image to the CPU.
+  const buffer = device.createBuffer({
+    size: row_stride * height * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+
+  // Copy the output image to the staging buffer.
+  const commands = device.createCommandEncoder();
+  commands.copyTextureToBuffer(
+    { texture: output },
+    { buffer, bytesPerRow: row_stride * 4 },
+    {
+      width,
+      height,
+    }
+  );
+  device.queue.submit([commands.finish()]);
+  await buffer.mapAsync(GPUMapMode.READ);
+  const result_data = new Uint8Array(buffer.getMappedRange());
+
+  // Check for errors and generate the diff map.
+  let num_errors = 0;
+  let max_error = 0;
+  const diff_data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      // Use green for a match.
+      diff_data[(x + y * width) * 4 + 0] = 0;
+      diff_data[(x + y * width) * 4 + 1] = 255;
+      diff_data[(x + y * width) * 4 + 2] = 0;
+      diff_data[(x + y * width) * 4 + 3] = 255;
+
+      let has_error = false;
+      for (let c = 0; c < 4; c++) {
+        const result = result_data[(x + y * row_stride) * 4 + c];
+        const reference = reference_data[(x + y * width) * 4 + c];
+        const diff = Math.abs(result - reference);
+        if (diff > 1) {
+          // Use red for large errors, orange for smaller errors.
+          if (diff > 20) {
+            diff_data[(x + y * width) * 4 + 0] = 255;
+            diff_data[(x + y * width) * 4 + 1] = 0;
+          } else {
+            diff_data[(x + y * width) * 4 + 0] = 255;
+            diff_data[(x + y * width) * 4 + 1] = 165;
+          }
+          max_error = Math.max(max_error, diff);
+          if (num_errors < 10) {
+            console.log(`error at ${x},${y},${c}: ${result} != ${reference}`);
+          }
+          if (!has_error) {
+            num_errors++;
+            has_error = true;
+          }
+        }
+      }
+    }
+  }
+  buffer.unmap();
+
+  if (num_errors) {
+    SetStatus(`${num_errors} errors found (maxdiff=${max_error}).`);
+  } else {
+    SetStatus("Verification succeeded.");
+  }
+
+  // Display the image diff.
+  DisplayImageData(diff_data, "diff_canvas");
+}
+
 // Initialize WebGPU.
 await InitWebGPU();
-
-// Load the default input image.
-LoadInputImage();
 
 // Display the default shader.
 GenerateShader();
@@ -295,3 +498,6 @@ document.querySelector("#run").addEventListener("click", Run);
 document.querySelector("#image_file").addEventListener("change", () => {
   LoadInputImage();
 });
+
+// Load the default input image.
+LoadInputImage();

@@ -16,11 +16,12 @@
     <select name="image_file" id="image_file" style="font-size: 80%">
       <option value="vik-beach-256x256">Vik Beach (256x256)</option>
       <option value="vik-beach-2000x1500">Vik Beach (2000x1500)</option>
-      <option value="vik-beach-4096x4096" selected="selected">
-        Vik Beach (4096x4096)
-      </option>
+      <option value="vik-beach-4096x4096" selected="selected">Vik Beach (4096x4096)</option>
     </select>
     <button id="run">Run</button>
+    <label id="status"></label>
+    <br />
+    <label id="runtime"></label>
     <br />
     <br />
 
@@ -29,12 +30,7 @@
         <td style="vertical-align: top">
           <b>Shader</b>
           <br />
-          <textarea
-            id="shader"
-            wrap="off"
-            style="max-width: 800px"
-            readonly
-          ></textarea>
+          <textarea id="shader" wrap="off" style="max-width: 800px" readonly></textarea>
         </td>
         <td style="vertical-align: top; width: 100%">
           <b>Input</b>
@@ -45,6 +41,16 @@
           <b>Output</b>
           <br />
           <canvas id="output_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Reference image</b>
+          <br />
+          <canvas id="reference_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Verification diff</b>
+          <br />
+          <canvas id="diff_canvas" style="width: 100%"></canvas>
         </td>
       </tr>
     </table>
