@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Tunable WebGPU bilateral filter</title>
+  </head>
+
+  <body>
+    <h1>Tunable WebGPU bilateral filter</h1>
+    <script type="module" src="dist/bilteral.js"></script>
+
+    A highly tunable bilateral filter implemented using WebGPU.
+
+    <br />
+    <br />
+    <select name="image_file" id="image_file">
+      <option value="vik-beach-256x256">Vik Beach (256x256)</option>
+      <option value="vik-beach-2026x1520" selected="selected">Vik Beach (2026x1520)</option>
+      <option value="vik-beach-4096x4096">Vik Beach (4096x4096)</option>
+    </select>
+    <select name="iterations" id="iterations">
+      <option value="10">10 iterations</option>
+      <option value="100" selected="selected">100 iterations</option>
+      <option value="1000">1000 iterations</option>
+    </select>
+    <select name="radius" id="radius">
+      <option value="1">3x3</option>
+      <option value="2" selected="selected">5x5</option>
+      <option value="3">7x7</option>
+      <option value="4">9x9</option>
+    </select>
+    <button id="run">Run</button>
+    <label id="status"></label>
+    <br />
+    <label id="runtime"></label>
+    <br />
+    <br />
+
+    <table>
+      <tr>
+        <td>
+          <table style="border: 1px solid black; font-weight: bold; border-collapse: collapse">
+            <tr style="border-bottom: 1px solid">
+              <th style="border-right: 1px solid"></th>
+              <th style="padding: 0 6px">Uniform</th>
+              <th style="padding: 0 6px">Const</th>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Sigma Domain</td>
+              <td style="text-align: center">
+                <input type="radio" name="sd_method" id="uniform_sd" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="sd_method" id="const_sd" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Sigma Range</td>
+              <td style="text-align: center">
+                <input type="radio" name="sr_method" id="uniform_sr" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="sr_method" id="const_sr" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Radius</td>
+              <td style="text-align: center">
+                <input type="radio" name="radius_method" id="uniform_radius" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="radius_method" id="const_radius" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Width</td>
+              <td style="text-align: center">
+                <input type="radio" name="width_method" id="uniform_width" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="width_method" id="const_width" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Height</td>
+              <td style="text-align: center">
+                <input type="radio" name="height_method" id="uniform_height" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="height_method" id="const_height" />
+              </td>
+            </tr>
+          </table>
+        </td>
+
+        <td style="padding: 0 6px">
+          <b>Prefetch:</b>
+          <select name="prefetch" id="prefetch">
+            <option value="none" selected="selected">None</option>
+            <option value="workgroup">Workgroup</option>
+          </select>
+        </td>
+      </tr>
+    </table>
+
+    <br />
+
+    <table>
+      <tr>
+        <td style="vertical-align: top">
+          <b>Shader</b>
+          <br />
+          <textarea id="shader" wrap="off" style="max-width: 800px" readonly></textarea>
+        </td>
+        <td style="vertical-align: top; width: 100%">
+          <b>Input</b>
+          <br />
+          <canvas id="input_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Output</b>
+          <br />
+          <canvas id="output_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Reference image</b>
+          <br />
+          <canvas id="reference_canvas" style="width: 100%"></canvas>
+
+          <br />
+          <b>Verification diff</b>
+          <br />
+          <canvas id="diff_canvas" style="width: 100%"></canvas>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
