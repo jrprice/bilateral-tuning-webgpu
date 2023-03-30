@@ -7,6 +7,8 @@ let sigma_range = 0.2;
 let radius = 2;
 
 // The shader parameters.
+let wgsize_x = 8;
+let wgsize_y = 8;
 let const_sigma_domain: boolean;
 let const_sigma_range: boolean;
 let const_radius: boolean;
@@ -191,9 +193,9 @@ const Run = async () => {
     });
   }
 
-  // TODO: Make workgroup size configurable.
-  const group_count_x = Math.floor((width + 15) / 16);
-  const group_count_y = Math.floor((height + 15) / 16);
+  // Determine the number of workgroups.
+  const group_count_x = Math.floor((width + wgsize_x - 1) / wgsize_x);
+  const group_count_y = Math.floor((height + wgsize_y - 1) / wgsize_y);
 
   // Helper to enqueue `n` back-to-back runs of the shader.
   function Enqueue(n: number) {
@@ -304,8 +306,8 @@ var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;
 
   // Emit the entry point header.
   wgsl += `
-const wgsize_x = 16;
-const wgsize_y = 16;
+const wgsize_x = ${wgsize_x};
+const wgsize_y = ${wgsize_y};
 
 @compute @workgroup_size(wgsize_x, wgsize_y)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -689,6 +691,14 @@ document.querySelector("#uniform_height").addEventListener("change", () => {
 });
 
 // Add event handlers for the shader parameter drop-down menus.
+document.querySelector("#wgsize_x").addEventListener("change", () => {
+  wgsize_x = +(<HTMLInputElement>document.getElementById("wgsize_x")).value;
+  UpdateShader();
+});
+document.querySelector("#wgsize_y").addEventListener("change", () => {
+  wgsize_y = +(<HTMLInputElement>document.getElementById("wgsize_y")).value;
+  UpdateShader();
+});
 document.querySelector("#prefetch").addEventListener("change", () => {
   prefetch = (<HTMLInputElement>document.getElementById("prefetch")).value;
   UpdateShader();
