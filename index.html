@@ -36,55 +36,69 @@
     <br />
     <br />
 
-    <table style="border: 1px solid black; font-weight: bold; border-collapse: collapse">
-      <tr style="border-bottom: 1px solid">
-        <th style="border-right: 1px solid"></th>
-        <th style="padding: 0 6px">Uniform</th>
-        <th style="padding: 0 6px">Const</th>
-      </tr>
+    <table>
       <tr>
-        <td style="border-right: 1px solid">Sigma Domain</td>
-        <td style="text-align: center">
-          <input type="radio" name="sd_method" id="uniform_sd" checked />
+        <td>
+          <table style="border: 1px solid black; font-weight: bold; border-collapse: collapse">
+            <tr style="border-bottom: 1px solid">
+              <th style="border-right: 1px solid"></th>
+              <th style="padding: 0 6px">Uniform</th>
+              <th style="padding: 0 6px">Const</th>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Sigma Domain</td>
+              <td style="text-align: center">
+                <input type="radio" name="sd_method" id="uniform_sd" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="sd_method" id="const_sd" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Sigma Range</td>
+              <td style="text-align: center">
+                <input type="radio" name="sr_method" id="uniform_sr" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="sr_method" id="const_sr" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Radius</td>
+              <td style="text-align: center">
+                <input type="radio" name="radius_method" id="uniform_radius" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="radius_method" id="const_radius" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Width</td>
+              <td style="text-align: center">
+                <input type="radio" name="width_method" id="uniform_width" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="width_method" id="const_width" />
+              </td>
+            </tr>
+            <tr>
+              <td style="border-right: 1px solid">Height</td>
+              <td style="text-align: center">
+                <input type="radio" name="height_method" id="uniform_height" checked />
+              </td>
+              <td style="text-align: center">
+                <input type="radio" name="height_method" id="const_height" />
+              </td>
+            </tr>
+          </table>
         </td>
-        <td style="text-align: center">
-          <input type="radio" name="sd_method" id="const_sd" />
-        </td>
-      </tr>
-      <tr>
-        <td style="border-right: 1px solid">Sigma Range</td>
-        <td style="text-align: center">
-          <input type="radio" name="sr_method" id="uniform_sr" checked />
-        </td>
-        <td style="text-align: center">
-          <input type="radio" name="sr_method" id="const_sr" />
-        </td>
-      </tr>
-      <tr>
-        <td style="border-right: 1px solid">Radius</td>
-        <td style="text-align: center">
-          <input type="radio" name="radius_method" id="uniform_radius" checked />
-        </td>
-        <td style="text-align: center">
-          <input type="radio" name="radius_method" id="const_radius" />
-        </td>
-      </tr>
-      <tr>
-        <td style="border-right: 1px solid">Width</td>
-        <td style="text-align: center">
-          <input type="radio" name="width_method" id="uniform_width" checked />
-        </td>
-        <td style="text-align: center">
-          <input type="radio" name="width_method" id="const_width" />
-        </td>
-      </tr>
-      <tr>
-        <td style="border-right: 1px solid">Height</td>
-        <td style="text-align: center">
-          <input type="radio" name="height_method" id="uniform_height" checked />
-        </td>
-        <td style="text-align: center">
-          <input type="radio" name="height_method" id="const_height" />
+
+        <td style="padding: 0 6px">
+          <b>Prefetch:</b>
+          <select name="prefetch" id="prefetch">
+            <option value="none" selected="selected">None</option>
+            <option value="workgroup">Workgroup</option>
+          </select>
         </td>
       </tr>
     </table>

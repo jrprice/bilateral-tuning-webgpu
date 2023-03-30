@@ -12,6 +12,7 @@ let const_sigma_range: boolean;
 let const_radius: boolean;
 let const_width: boolean;
 let const_height: boolean;
+let prefetch = "none";
 
 // The input image data.
 let width: number;
@@ -283,27 +284,83 @@ function GenerateShader(): string {
 `;
   }
 
-  // Emit the rest of the shader.
+  // Emit the global resources.
   wgsl += `@group(0) @binding(0) var input: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var input_sampler: sampler;
+`;
 
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  // Emit storage for prefetched data if enabled.
+  if (prefetch === "workgroup") {
+    if (!const_radius) {
+      return "Error: prefetching requires a constant radius.";
+    }
+    wgsl += `
+const kPrefetchWidth = wgsize_x + 2*${radius_expr};
+const kPrefetchHeight = wgsize_y + 2*${radius_expr};
+var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;
+`;
+  }
+
+  // Emit the entry point header.
+  wgsl += `
+const wgsize_x = 16;
+const wgsize_y = 16;
+
+@compute @workgroup_size(wgsize_x, wgsize_y)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id)  lid: vec3<u32>) {
   let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));
+`;
+
+  // Emit code to prefetch required data if prefetching is enabled, and load the center pixel.
+  if (prefetch === "workgroup") {
+    wgsl += `
+  // Prefetch the required data to workgroup storage.
+  let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};
+  for (var j = i32(lid.y); j < kPrefetchHeight; j += wgsize_y) {
+    for (var i = i32(lid.x); i < kPrefetchWidth; i += wgsize_x) {
+      let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;
+      prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);
+    }
+  }
+  workgroupBarrier();
+
+  let center_value = prefetch_data[lid.x+${radius_expr} + (lid.y+${radius_expr})*kPrefetchWidth];
+`;
+  } else {
+    wgsl += `
   let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
   let center_value = textureSampleLevel(input, input_sampler, center, 0);
+`;
+  }
 
+  // Emit the body of the shader.
+  wgsl += `
   var coeff = 0.f;
   var sum = vec4f();
   for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {
     for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {
       var norm = 0.f;
       var weight = 0.f;
+`;
 
+  // Load the pixel from either the texture or the prefetch store.
+  if (prefetch === "workgroup") {
+    wgsl += `
+      let x = i32(lid.x) + i + ${radius_expr};
+      let y = i32(lid.y) + j + ${radius_expr};
+      let pixel = prefetch_data[x + y*kPrefetchWidth];
+`;
+  } else {
+    wgsl += `
       let coord = center + (vec2f(f32(i), f32(j)) * step);
       let pixel = textureSampleLevel(input, input_sampler, coord, 0);
+`;
+  }
 
+  // Emit the weight calculations.
+  wgsl += `
       norm    = sqrt(f32(i*i) + f32(j*j)) * ${inv_sigma_domain_expr};
       weight  = -0.5f * (norm * norm);
 
@@ -315,21 +372,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       sum   += weight * pixel;
     }
   }
+`;
 
+  // Emit the predicated store for the result.
+  wgsl += `
   let result = vec4f(sum.xyz / coeff, center_value.w);
   if (all(gid.xy < vec2u(${width_expr}, ${height_expr}))) {
     textureStore(output, gid.xy, result);
   }
 }`;
 
-  // Display the shader.
+  return wgsl;
+}
+
+/// Update and display the WGSL shader.
+function UpdateShader() {
   const shader_display = document.getElementById("shader");
   shader_display.style.width = `0px`;
   shader_display.style.height = `0px`;
-  shader_display.textContent = wgsl;
+  shader_display.textContent = GenerateShader();
   shader_display.style.width = `${shader_display.scrollWidth}px`;
   shader_display.style.height = `${shader_display.scrollHeight}px`;
-  return wgsl;
 }
 
 /// Display a texture to a canvas.
@@ -566,7 +629,7 @@ async function VerifyResult(output: GPUTexture) {
 await InitWebGPU();
 
 // Display the default shader.
-GenerateShader();
+UpdateShader();
 
 // Add an event handler for the 'Run' button.
 document.querySelector("#run").addEventListener("click", Run);
@@ -578,50 +641,57 @@ document.querySelector("#image_file").addEventListener("change", () => {
 
 // Add an event handler for the radius selector.
 document.querySelector("#radius").addEventListener("change", () => {
-  radius = +(<HTMLInputElement>(document.getElementById("radius"))).value;
+  radius = +(<HTMLInputElement>document.getElementById("radius")).value;
   reference_data = null;
+  UpdateShader();
 });
 
 // Add event handlers for the shader parameter radio buttons.
 document.querySelector("#const_sd").addEventListener("change", () => {
   const_sigma_domain = true;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#uniform_sd").addEventListener("change", () => {
   const_sigma_domain = false;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#const_sr").addEventListener("change", () => {
   const_sigma_range = true;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#uniform_sr").addEventListener("change", () => {
   const_sigma_range = false;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#const_radius").addEventListener("change", () => {
   const_radius = true;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#uniform_radius").addEventListener("change", () => {
   const_radius = false;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#const_width").addEventListener("change", () => {
   const_width = true;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#uniform_width").addEventListener("change", () => {
   const_width = false;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#const_height").addEventListener("change", () => {
   const_height = true;
-  GenerateShader();
+  UpdateShader();
 });
 document.querySelector("#uniform_height").addEventListener("change", () => {
   const_height = false;
-  GenerateShader();
+  UpdateShader();
+});
+
+// Add event handlers for the shader parameter drop-down menus.
+document.querySelector("#prefetch").addEventListener("change", () => {
+  prefetch = (<HTMLInputElement>document.getElementById("prefetch")).value;
+  UpdateShader();
 });
 
 // Load the default input image.
