@@ -1,7 +1,7 @@
 export {};
 
 // The filter parameters.
-// TODO: Make the parameters configurable.
+// TODO: Make the sigma_domain and sigma_range parameters configurable.
 let sigma_domain = 3.0;
 let sigma_range = 0.2;
 let radius = 2;
@@ -574,6 +574,12 @@ document.querySelector("#run").addEventListener("click", Run);
 // Add an event handler for the image selector.
 document.querySelector("#image_file").addEventListener("change", () => {
   LoadInputImage();
+});
+
+// Add an event handler for the radius selector.
+document.querySelector("#radius").addEventListener("change", () => {
+  radius = +(<HTMLInputElement>(document.getElementById("radius"))).value;
+  reference_data = null;
 });
 
 // Add event handlers for the shader parameter radio buttons.
