@@ -6,6 +6,13 @@ let sigma_domain = 3.0;
 let sigma_range = 0.2;
 let radius = 2;
 
+// The shader parameters.
+let const_sigma_domain: boolean;
+let const_sigma_range: boolean;
+let const_radius: boolean;
+let const_width: boolean;
+let const_height: boolean;
+
 // The input image data.
 let width: number;
 let height: number;
@@ -130,11 +137,24 @@ const Run = async () => {
   const param_values = parameters.getMappedRange();
   const param_values_f32 = new Float32Array(param_values);
   const param_values_u32 = new Uint32Array(param_values);
-  param_values_f32[0] = 1.0 / sigma_domain;
-  param_values_f32[1] = 1.0 / sigma_range;
-  param_values_u32[2] = radius;
-  param_values_u32[3] = width;
-  param_values_u32[4] = height;
+
+  // Set values for any parameters that are not being embedded as constants.
+  let uniform_member_index = 0;
+  if (!const_sigma_domain) {
+    param_values_f32[uniform_member_index++] = 1.0 / sigma_domain;
+  }
+  if (!const_sigma_range) {
+    param_values_f32[uniform_member_index++] = 1.0 / sigma_range;
+  }
+  if (!const_radius) {
+    param_values_u32[uniform_member_index++] = radius;
+  }
+  if (!const_width) {
+    param_values_u32[uniform_member_index++] = width;
+  }
+  if (!const_height) {
+    param_values_u32[uniform_member_index++] = height;
+  }
   parameters.unmap();
 
   // Generate the shader and create the compute pipeline.
@@ -160,10 +180,15 @@ const Run = async () => {
     ],
     layout: pipeline.getBindGroupLayout(0),
   });
-  const bind_group_1 = device.createBindGroup({
-    entries: [{ binding: 0, resource: { buffer: parameters } }],
-    layout: pipeline.getBindGroupLayout(1),
-  });
+
+  // Create the bind group for the uniform parameters if necessary.
+  let bind_group_1 = null;
+  if (uniform_member_index > 0) {
+    bind_group_1 = device.createBindGroup({
+      entries: [{ binding: 0, resource: { buffer: parameters } }],
+      layout: pipeline.getBindGroupLayout(1),
+    });
+  }
 
   // TODO: Make workgroup size configurable.
   const group_count_x = Math.floor((width + 15) / 16);
@@ -175,7 +200,10 @@ const Run = async () => {
     const pass = commands.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bind_group_0);
-    pass.setBindGroup(1, bind_group_1);
+    if (bind_group_1) {
+      // Only set the bind group for the uniform parameters if it was created.
+      pass.setBindGroup(1, bind_group_1);
+    }
     for (let i = 0; i < n; i++) {
       pass.dispatchWorkgroups(group_count_x, group_count_y);
     }
@@ -206,40 +234,80 @@ const Run = async () => {
 
 /// Generate the WGSL shader.
 function GenerateShader(): string {
-  const wgsl = `struct Parameters {
-  inv_sigma_domain: f32,
-  inv_sigma_range: f32,
-  radius: i32,
-  width: u32,
-  height: u32,
-}
+  let wgsl = "";
 
-@group(0) @binding(0) var input: texture_2d<f32>;
+  // Generate the uniform struct members and the expressions for the filter parameters.
+  let uniform_members = "";
+  let inv_sigma_domain_expr;
+  let inv_sigma_range_expr;
+  let radius_expr;
+  let width_expr;
+  let height_expr;
+  if (const_sigma_domain) {
+    inv_sigma_domain_expr = `${1.0 / sigma_domain}`;
+  } else {
+    uniform_members += `\n  inv_sigma_domain: f32,`;
+    inv_sigma_domain_expr = "params.inv_sigma_domain";
+  }
+  if (const_sigma_range) {
+    inv_sigma_range_expr = `${1.0 / sigma_range}`;
+  } else {
+    uniform_members += `\n  inv_sigma_range: f32,`;
+    inv_sigma_range_expr = "params.inv_sigma_range";
+  }
+  if (const_radius) {
+    radius_expr = `${radius}`;
+  } else {
+    uniform_members += `\n  radius: i32,`;
+    radius_expr = "params.radius";
+  }
+  if (const_width) {
+    width_expr = `${width}`;
+  } else {
+    uniform_members += `\n  width: u32,`;
+    width_expr = "params.width";
+  }
+  if (const_height) {
+    height_expr = `${height}`;
+  } else {
+    uniform_members += `\n  height: u32,`;
+    height_expr = "params.height";
+  }
+
+  // Emit the uniform struct and variable if there is at least one member.
+  if (uniform_members) {
+    wgsl += `struct Parameters {${uniform_members}
+}
+@group(1) @binding(0) var<uniform> params: Parameters;
+
+`;
+  }
+
+  // Emit the rest of the shader.
+  wgsl += `@group(0) @binding(0) var input: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var input_sampler: sampler;
 
-@group(1) @binding(0) var<uniform> params: Parameters;
-
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let step = vec2f(1.f / f32(params.width), 1.f / f32(params.height));
+  let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));
   let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
   let center_value = textureSampleLevel(input, input_sampler, center, 0);
 
   var coeff = 0.f;
   var sum = vec4f();
-  for (var j = -params.radius; j <= params.radius; j++) {
-    for (var i = -params.radius; i <= params.radius; i++) {
+  for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {
+    for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {
       var norm = 0.f;
       var weight = 0.f;
 
       let coord = center + (vec2f(f32(i), f32(j)) * step);
       let pixel = textureSampleLevel(input, input_sampler, coord, 0);
 
-      norm    = sqrt(f32(i*i) + f32(j*j)) * params.inv_sigma_domain;
+      norm    = sqrt(f32(i*i) + f32(j*j)) * ${inv_sigma_domain_expr};
       weight  = -0.5f * (norm * norm);
 
-      norm    = distance(pixel.xyz, center_value.xyz) * params.inv_sigma_range;
+      norm    = distance(pixel.xyz, center_value.xyz) * ${inv_sigma_range_expr};
       weight += -0.5f * (norm * norm);
 
       weight = exp(weight);
@@ -249,7 +317,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let result = vec4f(sum.xyz / coeff, center_value.w);
-  if (all(gid.xy < vec2u(params.width, params.height))) {
+  if (all(gid.xy < vec2u(${width_expr}, ${height_expr}))) {
     textureStore(output, gid.xy, result);
   }
 }`;
@@ -506,6 +574,48 @@ document.querySelector("#run").addEventListener("click", Run);
 // Add an event handler for the image selector.
 document.querySelector("#image_file").addEventListener("change", () => {
   LoadInputImage();
+});
+
+// Add event handlers for the shader parameter radio buttons.
+document.querySelector("#const_sd").addEventListener("change", () => {
+  const_sigma_domain = true;
+  GenerateShader();
+});
+document.querySelector("#uniform_sd").addEventListener("change", () => {
+  const_sigma_domain = false;
+  GenerateShader();
+});
+document.querySelector("#const_sr").addEventListener("change", () => {
+  const_sigma_range = true;
+  GenerateShader();
+});
+document.querySelector("#uniform_sr").addEventListener("change", () => {
+  const_sigma_range = false;
+  GenerateShader();
+});
+document.querySelector("#const_radius").addEventListener("change", () => {
+  const_radius = true;
+  GenerateShader();
+});
+document.querySelector("#uniform_radius").addEventListener("change", () => {
+  const_radius = false;
+  GenerateShader();
+});
+document.querySelector("#const_width").addEventListener("change", () => {
+  const_width = true;
+  GenerateShader();
+});
+document.querySelector("#uniform_width").addEventListener("change", () => {
+  const_width = false;
+  GenerateShader();
+});
+document.querySelector("#const_height").addEventListener("change", () => {
+  const_height = true;
+  GenerateShader();
+});
+document.querySelector("#uniform_height").addEventListener("change", () => {
+  const_height = false;
+  GenerateShader();
 });
 
 // Load the default input image.
