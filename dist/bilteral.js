@@ -158,7 +158,7 @@ const Run = async () => {
             layout: pipeline.getBindGroupLayout(1),
         });
     }
-    // TODO: Make workgroup size configurable.
+    // Determine the number of workgroups.
     const group_count_x = Math.floor((width + wgsize_x - 1) / wgsize_x);
     const group_count_y = Math.floor((height + wgsize_y - 1) / wgsize_y);
     // Helper to enqueue `n` back-to-back runs of the shader.
