@@ -13,10 +13,15 @@
 
     <br />
     <br />
-    <select name="image_file" id="image_file" style="font-size: 80%">
+    <select name="image_file" id="image_file">
       <option value="vik-beach-256x256">Vik Beach (256x256)</option>
       <option value="vik-beach-2026x1520" selected="selected">Vik Beach (2026x1520)</option>
       <option value="vik-beach-4096x4096">Vik Beach (4096x4096)</option>
+    </select>
+    <select name="iterations" id="iterations">
+      <option value="10">10 iterations</option>
+      <option value="100" selected="selected">100 iterations</option>
+      <option value="1000">1000 iterations</option>
     </select>
     <button id="run">Run</button>
     <label id="status"></label>

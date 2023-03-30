@@ -217,14 +217,14 @@ const Run = async () => {
 
   // Timed runs.
   SetStatus("Running...");
-  const itrs = 100;
+  const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
   const start = performance.now();
   Enqueue(itrs);
   await device.queue.onSubmittedWorkDone();
   const end = performance.now();
   const elapsed = end - start;
-  const per_frame = elapsed / itrs;
-  const perf_str = `Elapsed time: ${elapsed.toFixed(2)} ms (${per_frame.toFixed(2)} ms/frame)`;
+  const fps = (itrs / elapsed) * 1000;
+  const perf_str = `Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`;
   document.getElementById("runtime").textContent = perf_str;
 
   DisplayTexture(output, "output_canvas");
