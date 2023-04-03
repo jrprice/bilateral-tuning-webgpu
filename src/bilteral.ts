@@ -148,7 +148,7 @@ const Run = async () => {
   // Set values for any parameters that are not being embedded as constants.
   let uniform_member_index = 0;
   if (!const_sigma_domain) {
-    param_values_f32[uniform_member_index++] = 1.0 / sigma_domain;
+    param_values_f32[uniform_member_index++] = 1.0 / (sigma_domain * sigma_domain);
   }
   if (!const_sigma_range) {
     param_values_f32[uniform_member_index++] = 1.0 / sigma_range;
@@ -269,16 +269,16 @@ function GenerateShader(): string {
 
   // Generate the uniform struct members and the expressions for the filter parameters.
   let uniform_members = "";
-  let inv_sigma_domain_expr;
+  let inv_sigma_domain_sq_expr;
   let inv_sigma_range_expr;
   let radius_expr;
   let width_expr;
   let height_expr;
   if (const_sigma_domain) {
-    inv_sigma_domain_expr = `${1.0 / sigma_domain}`;
+    inv_sigma_domain_sq_expr = `${1.0 / (sigma_domain * sigma_domain)}`;
   } else {
-    uniform_members += `\n  inv_sigma_domain: f32,`;
-    inv_sigma_domain_expr = "params.inv_sigma_domain";
+    uniform_members += `\n  inv_sigma_domain_sq: f32,`;
+    inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
   }
   if (const_sigma_range) {
     inv_sigma_range_expr = `${1.0 / sigma_range}`;
@@ -317,8 +317,8 @@ function GenerateShader(): string {
   spatial_coeff_lut = new Float32Array((radius + 1) * (radius + 1));
   for (let j = 0; j < radius + 1; j++) {
     for (let i = 0; i < radius + 1; i++) {
-      let norm = Math.sqrt(i * i + j * j) / sigma_domain;
-      spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * (norm * norm);
+      let norm = (i * i + j * j) / (sigma_domain * sigma_domain);
+      spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * norm;
     }
   }
   if (spatial_coeffs === "lut_uniform") {
@@ -415,8 +415,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
   if (spatial_coeffs === "inline") {
     wgsl += `
-      norm    = sqrt(f32(i*i) + f32(j*j)) * ${inv_sigma_domain_expr};
-      weight  = -0.5f * (norm * norm);
+      norm    = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
+      weight  = -0.5f * norm;
 `;
   } else if (spatial_coeffs === "lut_uniform") {
     wgsl += `
