@@ -12,9 +12,12 @@ let const_radius;
 let const_width;
 let const_height;
 let prefetch = "none";
+let spatial_coeffs = "inline";
 // The input image data.
 let width;
 let height;
+// The spatial coefficient LUT.
+let spatial_coeff_lut = null;
 // The reference result.
 let reference_data = null;
 // WebGPU objects.
@@ -113,7 +116,7 @@ const Run = async () => {
     // Set values for any parameters that are not being embedded as constants.
     let uniform_member_index = 0;
     if (!const_sigma_domain) {
-        param_values_f32[uniform_member_index++] = 1.0 / sigma_domain;
+        param_values_f32[uniform_member_index++] = 1.0 / (sigma_domain * sigma_domain);
     }
     if (!const_sigma_range) {
         param_values_f32[uniform_member_index++] = 1.0 / sigma_range;
@@ -150,11 +153,33 @@ const Run = async () => {
         ],
         layout: pipeline.getBindGroupLayout(0),
     });
+    // Create a uniform buffer for the spatial coefficient LUT if necessary.
+    let spatial_coeff_lut_buffer = null;
+    if (spatial_coeffs === "lut_uniform") {
+        let buffer_size = spatial_coeff_lut.length * 16;
+        spatial_coeff_lut_buffer = device.createBuffer({
+            size: buffer_size,
+            usage: GPUBufferUsage.UNIFORM,
+            mappedAtCreation: true,
+        });
+        const dst = new Float32Array(spatial_coeff_lut_buffer.getMappedRange());
+        for (let i = 0; i < spatial_coeff_lut.length; i++) {
+            dst[i * 4] = spatial_coeff_lut[i];
+        }
+        spatial_coeff_lut_buffer.unmap();
+    }
     // Create the bind group for the uniform parameters if necessary.
     let bind_group_1 = null;
+    let bind_group_1_entries = [];
     if (uniform_member_index > 0) {
+        bind_group_1_entries.push({ binding: 0, resource: { buffer: parameters } });
+    }
+    if (spatial_coeff_lut_buffer) {
+        bind_group_1_entries.push({ binding: 1, resource: { buffer: spatial_coeff_lut_buffer } });
+    }
+    if (bind_group_1_entries.length > 0) {
         bind_group_1 = device.createBindGroup({
-            entries: [{ binding: 0, resource: { buffer: parameters } }],
+            entries: bind_group_1_entries,
             layout: pipeline.getBindGroupLayout(1),
         });
     }
@@ -199,17 +224,17 @@ function GenerateShader() {
     let wgsl = "";
     // Generate the uniform struct members and the expressions for the filter parameters.
     let uniform_members = "";
-    let inv_sigma_domain_expr;
+    let inv_sigma_domain_sq_expr;
     let inv_sigma_range_expr;
     let radius_expr;
     let width_expr;
     let height_expr;
     if (const_sigma_domain) {
-        inv_sigma_domain_expr = `${1.0 / sigma_domain}`;
+        inv_sigma_domain_sq_expr = `${1.0 / (sigma_domain * sigma_domain)}`;
     }
     else {
-        uniform_members += `\n  inv_sigma_domain: f32,`;
-        inv_sigma_domain_expr = "params.inv_sigma_domain";
+        uniform_members += `\n  inv_sigma_domain_sq: f32,`;
+        inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
     }
     if (const_sigma_range) {
         inv_sigma_range_expr = `${1.0 / sigma_range}`;
@@ -244,11 +269,36 @@ function GenerateShader() {
         wgsl += `struct Parameters {${uniform_members}
 }
 @group(1) @binding(0) var<uniform> params: Parameters;
-
 `;
     }
+    // Generate and emit the spatial coefficient LUT if enabled.
+    spatial_coeff_lut = new Float32Array((radius + 1) * (radius + 1));
+    for (let j = 0; j < radius + 1; j++) {
+        for (let i = 0; i < radius + 1; i++) {
+            let norm = (i * i + j * j) / (sigma_domain * sigma_domain);
+            spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * norm;
+        }
+    }
+    if (spatial_coeffs === "lut_uniform") {
+        wgsl += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : array<vec4f, ${spatial_coeff_lut.length}>;
+`;
+    }
+    else if (spatial_coeffs === "lut_const") {
+        wgsl += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
+        for (let j = 0; j < radius + 1; j++) {
+            wgsl += `\n  `;
+            for (let i = 0; i < radius + 1; i++) {
+                wgsl += `${spatial_coeff_lut[i + j * (radius + 1)]}f, `;
+            }
+        }
+        wgsl += `\n);
+`;
+    }
+    else {
+    }
     // Emit the global resources.
-    wgsl += `@group(0) @binding(0) var input: texture_2d<f32>;
+    wgsl += `
+@group(0) @binding(0) var input: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var input_sampler: sampler;
 `;
@@ -318,11 +368,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
       let pixel = textureSampleLevel(input, input_sampler, coord, 0);
 `;
     }
+    if (spatial_coeffs === "inline") {
+        wgsl += `
+      norm    = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
+      weight  = -0.5f * norm;
+`;
+    }
+    else if (spatial_coeffs === "lut_uniform") {
+        wgsl += `
+      weight  = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;
+`;
+    }
+    else if (spatial_coeffs === "lut_const") {
+        wgsl += `
+      weight  = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];
+`;
+    }
     // Emit the weight calculations.
     wgsl += `
-      norm    = sqrt(f32(i*i) + f32(j*j)) * ${inv_sigma_domain_expr};
-      weight  = -0.5f * (norm * norm);
-
       norm    = distance(pixel.xyz, center_value.xyz) * ${inv_sigma_range_expr};
       weight += -0.5f * (norm * norm);
 
@@ -614,6 +677,10 @@ document.querySelector("#wgsize_y").addEventListener("change", () => {
 });
 document.querySelector("#prefetch").addEventListener("change", () => {
     prefetch = document.getElementById("prefetch").value;
+    UpdateShader();
+});
+document.querySelector("#spatial_coeffs").addEventListener("change", () => {
+    spatial_coeffs = document.getElementById("spatial_coeffs").value;
     UpdateShader();
 });
 // Load the default input image.
