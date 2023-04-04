@@ -563,11 +563,14 @@ async function GenerateReferenceResult() {
 
   // Generate the reference output.
   reference_data = new Uint8Array(width * height * 4);
+  const inv_255 = 1 / 255.0;
+  const inv_sigma_domain_sq = -0.5 / (sigma_domain * sigma_domain);
+  const inv_sigma_range_sq = -0.5 / (sigma_range * sigma_range);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const center_x = input_data[(x + y * row_stride) * 4 + 0] / 255.0;
-      const center_y = input_data[(x + y * row_stride) * 4 + 1] / 255.0;
-      const center_z = input_data[(x + y * row_stride) * 4 + 2] / 255.0;
+      const center_x = input_data[(x + y * row_stride) * 4 + 0] * inv_255;
+      const center_y = input_data[(x + y * row_stride) * 4 + 1] * inv_255;
+      const center_z = input_data[(x + y * row_stride) * 4 + 2] * inv_255;
       const center_w = input_data[(x + y * row_stride) * 4 + 3];
 
       let coeff = 0.0;
@@ -576,21 +579,16 @@ async function GenerateReferenceResult() {
         for (let i = -radius; i <= radius; i++) {
           let xi = Math.min(Math.max(x + i, 0), width - 1);
           let yj = Math.min(Math.max(y + j, 0), height - 1);
-          let pixel_x = input_data[(xi + yj * row_stride) * 4 + 0] / 255.0;
-          let pixel_y = input_data[(xi + yj * row_stride) * 4 + 1] / 255.0;
-          let pixel_z = input_data[(xi + yj * row_stride) * 4 + 2] / 255.0;
+          let pixel_x = input_data[(xi + yj * row_stride) * 4 + 0] * inv_255;
+          let pixel_y = input_data[(xi + yj * row_stride) * 4 + 1] * inv_255;
+          let pixel_z = input_data[(xi + yj * row_stride) * 4 + 2] * inv_255;
 
-          let norm;
-          let weight;
-
-          norm = Math.sqrt(i * i + j * j) / sigma_domain;
-          weight = -0.5 * (norm * norm);
+          let weight = (i * i + j * j) * inv_sigma_domain_sq;
 
           let dist_x = pixel_x - center_x;
           let dist_y = pixel_y - center_y;
           let dist_z = pixel_z - center_z;
-          norm = Math.sqrt(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z) / sigma_range;
-          weight += -0.5 * (norm * norm);
+          weight += (dist_x * dist_x + dist_y * dist_y + dist_z * dist_z) * inv_sigma_range_sq;
 
           weight = Math.exp(weight);
           coeff += weight;
