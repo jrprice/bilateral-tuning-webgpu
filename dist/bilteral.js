@@ -31,7 +31,10 @@ function SetStatus(str) {
 async function InitWebGPU() {
     // Initialize the WebGPU device and queue.
     SetStatus("Initializing...");
-    adapter = await navigator.gpu.requestAdapter();
+    const powerpref = document.getElementById("powerpref").value;
+    adapter = await navigator.gpu.requestAdapter({
+        powerPreference: powerpref,
+    });
     device = await adapter.requestDevice();
 }
 /// Get the texture for the canvas called `id`.
@@ -86,23 +89,29 @@ async function LoadInputImage() {
 /// Run the benchmark.
 const Run = async () => {
     SetStatus("Setting up...");
+    // Cycle through different input images to reduce the likelihood of caching.
+    const kNumInputImages = 3;
     // Create the input and output textures.
-    const input = device.createTexture({
-        size: { width, height },
-        format: "rgba8unorm",
-        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
-    });
+    const inputs = [];
+    const commands = device.createCommandEncoder();
+    for (let i = 0; i < kNumInputImages; i++) {
+        inputs.push(device.createTexture({
+            size: { width, height },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+        }));
+        // Copy the input image to the input texture.
+        commands.copyTextureToTexture({ texture: input_image_staging }, { texture: inputs[i] }, {
+            width,
+            height,
+        });
+    }
     const output = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
         usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
-    // Copy the input image to the input texture.
-    const commands = device.createCommandEncoder();
-    commands.copyTextureToTexture({ texture: input_image_staging }, { texture: input }, {
-        width,
-        height,
-    });
+    // Wait for copies to complete.
     device.queue.submit([commands.finish()]);
     // Set up the filter parameters.
     const parameters = device.createBuffer({
@@ -137,22 +146,26 @@ const Run = async () => {
         compute: { module, entryPoint: "main" },
         layout: "auto",
     });
-    const bind_group_0 = device.createBindGroup({
-        entries: [
-            { binding: 0, resource: input.createView() },
-            { binding: 1, resource: output.createView() },
-            {
-                binding: 2,
-                resource: device.createSampler({
-                    addressModeU: "clamp-to-edge",
-                    addressModeV: "clamp-to-edge",
-                    minFilter: "nearest",
-                    magFilter: "nearest",
-                }),
-            },
-        ],
-        layout: pipeline.getBindGroupLayout(0),
-    });
+    // Create a bind group for group index 0 for each input image.
+    const bind_group_0 = [];
+    for (let i = 0; i < kNumInputImages; i++) {
+        bind_group_0.push(device.createBindGroup({
+            entries: [
+                { binding: 0, resource: inputs[i].createView() },
+                { binding: 1, resource: output.createView() },
+                {
+                    binding: 2,
+                    resource: device.createSampler({
+                        addressModeU: "clamp-to-edge",
+                        addressModeV: "clamp-to-edge",
+                        minFilter: "nearest",
+                        magFilter: "nearest",
+                    }),
+                },
+            ],
+            layout: pipeline.getBindGroupLayout(0),
+        }));
+    }
     // Create a uniform buffer for the spatial coefficient LUT if necessary.
     let spatial_coeff_lut_buffer = null;
     if (spatial_coeffs === "lut_uniform") {
@@ -191,12 +204,12 @@ const Run = async () => {
         const commands = device.createCommandEncoder();
         const pass = commands.beginComputePass();
         pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bind_group_0);
         if (bind_group_1) {
             // Only set the bind group for the uniform parameters if it was created.
             pass.setBindGroup(1, bind_group_1);
         }
         for (let i = 0; i < n; i++) {
+            pass.setBindGroup(0, bind_group_0[n % kNumInputImages]);
             pass.dispatchWorkgroups(group_count_x, group_count_y);
         }
         pass.end();
@@ -613,6 +626,11 @@ await InitWebGPU();
 UpdateShader();
 // Add an event handler for the 'Run' button.
 document.querySelector("#run").addEventListener("click", Run);
+// Add an event handler for the power preference selector.
+document.querySelector("#powerpref").addEventListener("change", () => {
+    InitWebGPU();
+    LoadInputImage();
+});
 // Add an event handler for the image selector.
 document.querySelector("#image_file").addEventListener("change", () => {
     LoadInputImage();
