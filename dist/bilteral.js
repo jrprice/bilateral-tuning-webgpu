@@ -235,6 +235,12 @@ const Run = async () => {
 /// Generate the WGSL shader.
 function GenerateShader() {
     let wgsl = "";
+    let constants = "";
+    let structures = "";
+    let uniforms = "";
+    // Generate constants for the workgroup size.
+    constants += `const kWorkgroupSizeX = ${wgsize_x};\n`;
+    constants += `const kWorkgroupSizeY = ${wgsize_y};\n`;
     // Generate the uniform struct members and the expressions for the filter parameters.
     let uniform_members = "";
     let inv_sigma_domain_sq_expr;
@@ -243,35 +249,40 @@ function GenerateShader() {
     let width_expr;
     let height_expr;
     if (const_sigma_domain) {
-        inv_sigma_domain_sq_expr = `${-0.5 / (sigma_domain * sigma_domain)}`;
+        constants += `const kInverseSigmaDomainSquared = ${-0.5 / (sigma_domain * sigma_domain)};\n`;
+        inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
     }
     else {
         uniform_members += `\n  inv_sigma_domain_sq: f32,`;
         inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
     }
     if (const_sigma_range) {
-        inv_sigma_range_sq_expr = `${-0.5 / (sigma_range * sigma_range)}`;
+        constants += `const kInverseSigmaRangeSquared = ${-0.5 / (sigma_range * sigma_range)};\n`;
+        inv_sigma_range_sq_expr = "kInverseSigmaRangeSquared";
     }
     else {
         uniform_members += `\n  inv_sigma_range_sq: f32,`;
         inv_sigma_range_sq_expr = "params.inv_sigma_range_sq";
     }
     if (const_radius) {
-        radius_expr = `${radius}`;
+        constants += `const kRadius = ${radius};\n`;
+        radius_expr = "kRadius";
     }
     else {
         uniform_members += `\n  radius: i32,`;
         radius_expr = "params.radius";
     }
     if (const_width) {
-        width_expr = `${width}`;
+        constants += `const kWidth = ${width};\n`;
+        width_expr = "kWidth";
     }
     else {
         uniform_members += `\n  width: u32,`;
         width_expr = "params.width";
     }
     if (const_height) {
-        height_expr = `${height}`;
+        constants += `const kHeight = ${height};\n`;
+        height_expr = "kHeight";
     }
     else {
         uniform_members += `\n  height: u32,`;
@@ -279,10 +290,9 @@ function GenerateShader() {
     }
     // Emit the uniform struct and variable if there is at least one member.
     if (uniform_members) {
-        wgsl += `struct Parameters {${uniform_members}
-}
-@group(1) @binding(0) var<uniform> params: Parameters;
-`;
+        structures += `struct Parameters {${uniform_members}
+}\n`;
+        uniforms += "@group(1) @binding(0) var<uniform> params: Parameters;\n";
     }
     // Generate and emit the spatial coefficient LUT if enabled.
     spatial_coeff_lut = new Float32Array((radius + 1) * (radius + 1));
@@ -293,24 +303,30 @@ function GenerateShader() {
         }
     }
     if (spatial_coeffs === "lut_uniform") {
-        wgsl += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : array<vec4f, ${spatial_coeff_lut.length}>;
+        const lut_type = `array<vec4f, ${spatial_coeff_lut.length}>`;
+        uniforms += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : ${lut_type};
 `;
     }
     else if (spatial_coeffs === "lut_const") {
-        wgsl += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
+        constants += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
         for (let j = 0; j < radius + 1; j++) {
-            wgsl += `\n  `;
+            constants += `\n  `;
             for (let i = 0; i < radius + 1; i++) {
-                wgsl += `${spatial_coeff_lut[i + j * (radius + 1)]}f, `;
+                constants += `${spatial_coeff_lut[i + j * (radius + 1)]}f, `;
             }
         }
-        wgsl += `\n);
+        constants += `\n);
 `;
     }
-    else {
+    wgsl += `// Constants.\n${constants}\n`;
+    if (structures) {
+        wgsl += `// Structures.\n${structures}\n`;
+    }
+    if (uniforms) {
+        wgsl += `// Uniforms.\n${uniforms}\n`;
     }
     // Emit the global resources.
-    wgsl += `
+    wgsl += `// Inputs and outputs.
 @group(0) @binding(0) var input: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var input_sampler: sampler;
@@ -320,18 +336,15 @@ function GenerateShader() {
         if (!const_radius) {
             return "Error: prefetching requires a constant radius.";
         }
-        wgsl += `
-const kPrefetchWidth = wgsize_x + 2*${radius_expr};
-const kPrefetchHeight = wgsize_y + 2*${radius_expr};
+        wgsl += `\n// Prefetch storage.
+const kPrefetchWidth = kWorkgroupSizeX + 2*${radius_expr};
+const kPrefetchHeight = kWorkgroupSizeY + 2*${radius_expr};
 var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;
 `;
     }
     // Emit the entry point header.
-    wgsl += `
-const wgsize_x = ${wgsize_x};
-const wgsize_y = ${wgsize_y};
-
-@compute @workgroup_size(wgsize_x, wgsize_y)
+    wgsl += `\n// Entry point.
+@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(local_invocation_id)  lid: vec3<u32>) {
   let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));
@@ -341,8 +354,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         wgsl += `
   // Prefetch the required data to workgroup storage.
   let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};
-  for (var j = i32(lid.y); j < kPrefetchHeight; j += wgsize_y) {
-    for (var i = i32(lid.x); i < kPrefetchWidth; i += wgsize_x) {
+  for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {
+    for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {
       let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;
       prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);
     }
