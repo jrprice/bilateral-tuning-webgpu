@@ -40,7 +40,10 @@ function SetStatus(str: string) {
 async function InitWebGPU() {
   // Initialize the WebGPU device and queue.
   SetStatus("Initializing...");
-  adapter = await navigator.gpu.requestAdapter();
+  const powerpref = (<HTMLInputElement>document.getElementById("powerpref")).value;
+  adapter = await navigator.gpu.requestAdapter({
+    powerPreference: powerpref as GPUPowerPreference,
+  });
   device = await adapter.requestDevice();
 }
 
@@ -712,6 +715,12 @@ UpdateShader();
 
 // Add an event handler for the 'Run' button.
 document.querySelector("#run").addEventListener("click", Run);
+
+// Add an event handler for the power preference selector.
+document.querySelector("#powerpref").addEventListener("change", () => {
+  InitWebGPU();
+  LoadInputImage();
+});
 
 // Add an event handler for the image selector.
 document.querySelector("#image_file").addEventListener("change", () => {
