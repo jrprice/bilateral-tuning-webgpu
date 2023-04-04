@@ -24,13 +24,20 @@ let reference_data = null;
 let adapter;
 let device;
 let input_image_staging;
-function SetStatus(str) {
+function SetStatus(str, color = "#000000") {
     document.getElementById("status").textContent = str;
+    document.getElementById("status").style.color = color;
 }
 /// Initialize the main WebGPU objects.
 async function InitWebGPU() {
-    // Initialize the WebGPU device and queue.
     SetStatus("Initializing...");
+    // Check for WebGPU support.
+    if (!navigator.gpu) {
+        SetStatus("WebGPU is not supported in this browser!", "#FF0000");
+        document.getElementById("run").disabled = true;
+        throw "WebGPU is not supported in this browser.";
+    }
+    // Initialize the WebGPU adapter and device.
     const powerpref = document.getElementById("powerpref").value;
     adapter = await navigator.gpu.requestAdapter({
         powerPreference: powerpref,
@@ -625,7 +632,7 @@ async function VerifyResult(output) {
     }
     buffer.unmap();
     if (num_errors) {
-        SetStatus(`${num_errors} errors found (maxdiff=${max_error}).`);
+        SetStatus(`${num_errors} errors found (maxdiff=${max_error}).`, "#FF0000");
     }
     else {
         SetStatus("Verification succeeded.");
