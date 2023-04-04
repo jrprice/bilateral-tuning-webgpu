@@ -11,6 +11,7 @@ let const_sigma_range;
 let const_radius;
 let const_width;
 let const_height;
+let input_type = "image_sample";
 let prefetch = "none";
 let spatial_coeffs = "inline";
 // The input image data.
@@ -156,20 +157,24 @@ const Run = async () => {
     // Create a bind group for group index 0 for each input image.
     const bind_group_0 = [];
     for (let i = 0; i < kNumInputImages; i++) {
+        let entries;
+        entries = [
+            { binding: 0, resource: inputs[i].createView() },
+            { binding: 1, resource: output.createView() },
+        ];
+        if (input_type === "image_sample") {
+            entries.push({
+                binding: 2,
+                resource: device.createSampler({
+                    addressModeU: "clamp-to-edge",
+                    addressModeV: "clamp-to-edge",
+                    minFilter: "nearest",
+                    magFilter: "nearest",
+                }),
+            });
+        }
         bind_group_0.push(device.createBindGroup({
-            entries: [
-                { binding: 0, resource: inputs[i].createView() },
-                { binding: 1, resource: output.createView() },
-                {
-                    binding: 2,
-                    resource: device.createSampler({
-                        addressModeU: "clamp-to-edge",
-                        addressModeV: "clamp-to-edge",
-                        minFilter: "nearest",
-                        magFilter: "nearest",
-                    }),
-                },
-            ],
+            entries,
             layout: pipeline.getBindGroupLayout(0),
         }));
     }
@@ -336,8 +341,11 @@ function GenerateShader() {
     wgsl += `// Inputs and outputs.
 @group(0) @binding(0) var input: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var input_sampler: sampler;
 `;
+    if (input_type === "image_sample") {
+        wgsl += `@group(0) @binding(2) var input_sampler: sampler;
+`;
+    }
     // Emit storage for prefetched data if enabled.
     if (prefetch === "workgroup") {
         if (!const_radius) {
@@ -362,9 +370,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
   // Prefetch the required data to workgroup storage.
   let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};
   for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {
-    for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {
+    for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`;
+        if (input_type === "image_sample") {
+            wgsl += `
       let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;
-      prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);
+      prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);`;
+        }
+        else {
+            wgsl += `
+      let coord = prefetch_base + vec2i(i, j);
+      prefetch_data[i + j*kPrefetchWidth] = textureLoad(input, coord, 0);`;
+        }
+        wgsl += `
     }
   }
   workgroupBarrier();
@@ -373,10 +390,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 `;
     }
     else {
-        wgsl += `
+        if (input_type === "image_sample") {
+            wgsl += `
   let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
   let center_value = textureSampleLevel(input, input_sampler, center, 0);
 `;
+        }
+        else {
+            wgsl += `
+  let center_value = textureLoad(input, gid.xy, 0);
+`;
+        }
     }
     // Emit the body of the shader.
     wgsl += `
@@ -395,10 +419,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 `;
     }
     else {
-        wgsl += `
+        if (input_type === "image_sample") {
+            wgsl += `
       let coord = center + (vec2f(f32(i), f32(j)) * step);
       let pixel = textureSampleLevel(input, input_sampler, coord, 0);
 `;
+        }
+        else {
+            wgsl += `
+      let pixel = textureLoad(input, vec2i(gid.xy) + vec2i(i, j), 0);
+`;
+        }
     }
     // Emit the spatial coefficient calculation.
     if (spatial_coeffs === "inline") {
@@ -709,6 +740,10 @@ document.querySelector("#wgsize_x").addEventListener("change", () => {
 });
 document.querySelector("#wgsize_y").addEventListener("change", () => {
     wgsize_y = +document.getElementById("wgsize_y").value;
+    UpdateShader();
+});
+document.querySelector("#input_type").addEventListener("change", () => {
+    input_type = document.getElementById("input_type").value;
     UpdateShader();
 });
 document.querySelector("#prefetch").addEventListener("change", () => {
