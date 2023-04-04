@@ -36,9 +36,9 @@
       <option value="4">9x9</option>
     </select>
     <button id="run">Run</button>
-    <label id="status" style="font-weight: bold;"></label>
+    <label id="status" style="font-weight: bold"></label>
     <br />
-    <label id="runtime" style="font-weight: bold;"></label>
+    <label id="runtime" style="font-weight: bold"></label>
     <br />
     <br />
 
@@ -124,6 +124,12 @@
             <option value="64">64</option>
             <option value="128">128</option>
             <option value="256">256</option>
+          </select>
+          <br />
+          <b>Input type:</b>
+          <select name="input_type" id="input_type">
+            <option value="image_sample" selected="selected">Image (sample)</option>
+            <option value="image_load">Image (load)</option>
           </select>
           <br />
           <b>Prefetch:</b>
