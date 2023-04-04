@@ -148,10 +148,10 @@ const Run = async () => {
   // Set values for any parameters that are not being embedded as constants.
   let uniform_member_index = 0;
   if (!const_sigma_domain) {
-    param_values_f32[uniform_member_index++] = 1.0 / (sigma_domain * sigma_domain);
+    param_values_f32[uniform_member_index++] = -0.5 / (sigma_domain * sigma_domain);
   }
   if (!const_sigma_range) {
-    param_values_f32[uniform_member_index++] = 1.0 / sigma_range;
+    param_values_f32[uniform_member_index++] = -0.5 / (sigma_range * sigma_range);
   }
   if (!const_radius) {
     param_values_u32[uniform_member_index++] = radius;
@@ -270,21 +270,21 @@ function GenerateShader(): string {
   // Generate the uniform struct members and the expressions for the filter parameters.
   let uniform_members = "";
   let inv_sigma_domain_sq_expr;
-  let inv_sigma_range_expr;
+  let inv_sigma_range_sq_expr;
   let radius_expr;
   let width_expr;
   let height_expr;
   if (const_sigma_domain) {
-    inv_sigma_domain_sq_expr = `${1.0 / (sigma_domain * sigma_domain)}`;
+    inv_sigma_domain_sq_expr = `${-0.5 / (sigma_domain * sigma_domain)}`;
   } else {
     uniform_members += `\n  inv_sigma_domain_sq: f32,`;
     inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
   }
   if (const_sigma_range) {
-    inv_sigma_range_expr = `${1.0 / sigma_range}`;
+    inv_sigma_range_sq_expr = `${-0.5 / (sigma_range * sigma_range)}`;
   } else {
-    uniform_members += `\n  inv_sigma_range: f32,`;
-    inv_sigma_range_expr = "params.inv_sigma_range";
+    uniform_members += `\n  inv_sigma_range_sq: f32,`;
+    inv_sigma_range_sq_expr = "params.inv_sigma_range_sq";
   }
   if (const_radius) {
     radius_expr = `${radius}`;
@@ -395,7 +395,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
   var sum = vec4f();
   for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {
     for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {
-      var norm = 0.f;
       var weight = 0.f;
 `;
 
@@ -413,29 +412,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 `;
   }
 
+  // Emit the spatial coefficient calculation.
   if (spatial_coeffs === "inline") {
     wgsl += `
-      norm    = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
-      weight  = -0.5f * norm;
+      weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
 `;
   } else if (spatial_coeffs === "lut_uniform") {
     wgsl += `
-      weight  = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;
+      weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;
 `;
   } else if (spatial_coeffs === "lut_const") {
     wgsl += `
-      weight  = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];
+      weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];
 `;
   }
 
   // Emit the weight calculations.
   wgsl += `
-      norm    = distance(pixel.xyz, center_value.xyz) * ${inv_sigma_range_expr};
-      weight += -0.5f * (norm * norm);
+      let diff = pixel.xyz - center_value.xyz;
+      weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};
 
-      weight = exp(weight);
-      coeff += weight;
-      sum   += weight * pixel;
+      weight   = exp(weight);
+      coeff   += weight;
+      sum     += weight * pixel;
     }
   }
 `;
