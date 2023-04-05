@@ -298,10 +298,16 @@ const Run = async () => {
 
 /// Generate the WGSL shader.
 function GenerateShader(): string {
+  let indent = 0;
   let wgsl = "";
   let constants = "";
   let structures = "";
   let uniforms = "";
+
+  // Helper to add a line to the shader respecting the current indentation.
+  function line(str = "") {
+    wgsl += "  ".repeat(indent) + str + "\n";
+  }
 
   // Generate constants for the workgroup size.
   constants += `const kWorkgroupSizeX = ${wgsize_x};\n`;
@@ -381,22 +387,20 @@ function GenerateShader(): string {
 `;
   }
 
-  wgsl += `// Constants.\n${constants}\n`;
+  line(`// Constants.\n${constants}`);
   if (structures) {
-    wgsl += `// Structures.\n${structures}\n`;
+    line(`// Structures.\n${structures}`);
   }
   if (uniforms) {
-    wgsl += `// Uniforms.\n${uniforms}\n`;
+    line(`// Uniforms.\n${uniforms}`);
   }
 
   // Emit the global resources.
-  wgsl += `// Inputs and outputs.
-@group(0) @binding(0) var input: texture_2d<f32>;
-@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
-`;
+  line(`// Inputs and outputs.`);
+  line(`@group(0) @binding(0) var input: texture_2d<f32>;`);
+  line(`@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;`);
   if (input_type === "image_sample") {
-    wgsl += `@group(0) @binding(2) var input_sampler: sampler;
-`;
+    line(`@group(0) @binding(2) var input_sampler: sampler;`);
   }
 
   // Emit storage for prefetched data if enabled.
@@ -404,120 +408,114 @@ function GenerateShader(): string {
     if (!const_radius) {
       return "Error: prefetching requires a constant radius.";
     }
-    wgsl += `\n// Prefetch storage.
-const kPrefetchWidth = kWorkgroupSizeX + 2*${radius_expr};
-const kPrefetchHeight = kWorkgroupSizeY + 2*${radius_expr};
-var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;
-`;
+    line();
+    line(`// Prefetch storage.`);
+    line(`const kPrefetchWidth = kWorkgroupSizeX + 2*${radius_expr};`);
+    line(`const kPrefetchHeight = kWorkgroupSizeY + 2*${radius_expr};`);
+    line(`var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;`);
   }
 
   // Emit the entry point header.
-  wgsl += `\n// Entry point.
-@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>,
-        @builtin(local_invocation_id)  lid: vec3<u32>) {
-  let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));
-`;
+  line();
+  line(`// Entry point.`);
+  line(`@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)`);
+  line(`fn main(@builtin(global_invocation_id) gid: vec3<u32>,`);
+  line(`        @builtin(local_invocation_id)  lid: vec3<u32>) {`);
+  indent++;
+  line(`let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));`);
 
   // Emit code to prefetch required data if prefetching is enabled, and load the center pixel.
   if (prefetch === "workgroup") {
-    wgsl += `
-  // Prefetch the required data to workgroup storage.
-  let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};
-  for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {
-    for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`;
+    line();
+    line(`// Prefetch the required data to workgroup storage.`);
+    line(`let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};`);
+    line(`for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {`);
+    indent++;
+    line(`for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`);
+    indent++;
+    const rhs = `prefetch_data[i + j*kPrefetchWidth]`;
     if (input_type === "image_sample") {
-      wgsl += `
-      let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;
-      prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);`;
+      line(`let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;`);
+      line(`${rhs} = textureSampleLevel(input, input_sampler, coord, 0);`);
     } else {
-      wgsl += `
-      let coord = prefetch_base + vec2i(i, j);
-      prefetch_data[i + j*kPrefetchWidth] = textureLoad(input, coord, 0);`;
+      line(`let coord = prefetch_base + vec2i(i, j);`);
+      line(`${rhs} = textureLoad(input, coord, 0);`);
     }
-    wgsl += `
-    }
-  }
-  workgroupBarrier();
-
-  let center_value = prefetch_data[lid.x+${radius_expr} + (lid.y+${radius_expr})*kPrefetchWidth];
-`;
+    indent--;
+    line(`}`);
+    indent--;
+    line(`}`);
+    line(`workgroupBarrier();`);
+    line();
+    const load = `prefetch_data[lid.x+${radius_expr} + (lid.y+${radius_expr})*kPrefetchWidth];`;
+    line(`let center_value = ${load}`);
   } else {
     if (input_type === "image_sample") {
-      wgsl += `
-  let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
-  let center_value = textureSampleLevel(input, input_sampler, center, 0);
-`;
+      line(`let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;`);
+      line(`let center_value = textureSampleLevel(input, input_sampler, center, 0);`);
     } else {
-      wgsl += `
-  let center_value = textureLoad(input, gid.xy, 0);
-`;
+      line(`let center_value = textureLoad(input, gid.xy, 0);`);
     }
   }
 
-  // Emit the body of the shader.
-  wgsl += `
-  var coeff = 0.f;
-  var sum = vec4f();
-  for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {
-    for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {
-      var weight = 0.f;
-`;
+  // Emit the main filter loop.
+  line();
+  line(`var coeff = 0.f;`);
+  line(`var sum = vec4f();`);
+  line(`for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {`);
+  indent++;
+  line(`for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {`);
+  indent++;
+  line(`var weight = 0.f;`);
+  line();
 
   // Load the pixel from either the texture or the prefetch store.
   if (prefetch === "workgroup") {
-    wgsl += `
-      let x = i32(lid.x) + i + ${radius_expr};
-      let y = i32(lid.y) + j + ${radius_expr};
-      let pixel = prefetch_data[x + y*kPrefetchWidth];
-`;
+    line(`let x = i32(lid.x) + i + ${radius_expr};`);
+    line(`let y = i32(lid.y) + j + ${radius_expr};`);
+    line(`let pixel = prefetch_data[x + y*kPrefetchWidth];`);
   } else {
     if (input_type === "image_sample") {
-      wgsl += `
-      let coord = center + (vec2f(f32(i), f32(j)) * step);
-      let pixel = textureSampleLevel(input, input_sampler, coord, 0);
-`;
+      line(`let coord = center + (vec2f(f32(i), f32(j)) * step);`);
+      line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
     } else {
-      wgsl += `
-      let pixel = textureLoad(input, vec2i(gid.xy) + vec2i(i, j), 0);
-`;
+      line(`let pixel = textureLoad(input, vec2i(gid.xy) + vec2i(i, j), 0);`);
     }
   }
 
   // Emit the spatial coefficient calculation.
+  line();
   if (spatial_coeffs === "inline") {
-    wgsl += `
-      weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
-`;
+    line(`weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};`);
   } else if (spatial_coeffs === "lut_uniform") {
-    wgsl += `
-      weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;
-`;
+    line(`weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;`);
   } else if (spatial_coeffs === "lut_const") {
-    wgsl += `
-      weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];
-`;
+    line(`weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];`);
   }
 
-  // Emit the weight calculations.
-  wgsl += `
-      let diff = pixel.xyz - center_value.xyz;
-      weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};
+  // Emit the radiometric difference calculation.
+  line();
+  line(`let diff = pixel.xyz - center_value.xyz;`);
+  line(`weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};`);
+  line();
 
-      weight   = exp(weight);
-      coeff   += weight;
-      sum     += weight * pixel;
-    }
-  }
-`;
+  // Finalize the weight and accumulate into the coefficient and sum.
+  line(`weight   = exp(weight);`);
+  line(`coeff   += weight;`);
+  line(`sum     += weight * pixel;`);
+  indent--;
+  line(`}`);
+  indent--;
+  line(`}`);
 
   // Emit the predicated store for the result.
-  wgsl += `
-  let result = vec4f(sum.xyz / coeff, center_value.w);
-  if (all(gid.xy < vec2u(${width_expr}, ${height_expr}))) {
-    textureStore(output, gid.xy, result);
-  }
-}`;
+  line();
+  line(`let result = vec4f(sum.xyz / coeff, center_value.w);`);
+  line(`if (all(gid.xy < vec2u(${width_expr}, ${height_expr}))) {`);
+  line(`  textureStore(output, gid.xy, result);`);
+  line(`}`);
+  indent--;
+  line(`}`);
 
   return wgsl;
 }
