@@ -6,6 +6,8 @@ let radius = 2;
 // The shader parameters.
 let wgsize_x = 8;
 let wgsize_y = 8;
+let tilesize_x = 1;
+let tilesize_y = 1;
 let const_sigma_domain;
 let const_sigma_range;
 let const_radius;
@@ -209,8 +211,10 @@ const Run = async () => {
         });
     }
     // Determine the number of workgroups.
-    const group_count_x = Math.floor((width + wgsize_x - 1) / wgsize_x);
-    const group_count_y = Math.floor((height + wgsize_y - 1) / wgsize_y);
+    const pixels_per_group_x = wgsize_x * tilesize_x;
+    const pixels_per_group_y = wgsize_y * tilesize_y;
+    const group_count_x = Math.floor((width + pixels_per_group_x - 1) / pixels_per_group_x);
+    const group_count_y = Math.floor((height + pixels_per_group_y - 1) / pixels_per_group_y);
     // Helper to enqueue `n` back-to-back runs of the shader.
     function Enqueue(n) {
         const commands = device.createCommandEncoder();
@@ -246,13 +250,32 @@ const Run = async () => {
 };
 /// Generate the WGSL shader.
 function GenerateShader() {
+    let indent = 0;
     let wgsl = "";
     let constants = "";
     let structures = "";
     let uniforms = "";
+    // Helper to add a line to the shader respecting the current indentation.
+    function line(str = "") {
+        wgsl += "  ".repeat(indent) + str + "\n";
+    }
     // Generate constants for the workgroup size.
     constants += `const kWorkgroupSizeX = ${wgsize_x};\n`;
     constants += `const kWorkgroupSizeY = ${wgsize_y};\n`;
+    // Generate constants for the tile size if necessary.
+    if (tilesize_x > 1) {
+        constants += `const kTileWidth = ${tilesize_x};\n`;
+    }
+    if (tilesize_y > 1) {
+        constants += `const kTileHeight = ${tilesize_y};\n`;
+    }
+    let tilesize = "";
+    if (tilesize_x > 1 || tilesize_y > 1) {
+        const width = tilesize_x > 1 ? "kTileWidth" : "1";
+        const height = tilesize_y > 1 ? "kTileHeight" : "1";
+        tilesize = `kTileSize`;
+        constants += `const ${tilesize} = vec2(${width}, ${height});\n`;
+    }
     // Generate the uniform struct members and the expressions for the filter parameters.
     let uniform_members = "";
     let inv_sigma_domain_sq_expr;
@@ -330,141 +353,159 @@ function GenerateShader() {
         constants += `\n);
 `;
     }
-    wgsl += `// Constants.\n${constants}\n`;
+    line(`// Constants.\n${constants}`);
     if (structures) {
-        wgsl += `// Structures.\n${structures}\n`;
+        line(`// Structures.\n${structures}`);
     }
     if (uniforms) {
-        wgsl += `// Uniforms.\n${uniforms}\n`;
+        line(`// Uniforms.\n${uniforms}`);
     }
     // Emit the global resources.
-    wgsl += `// Inputs and outputs.
-@group(0) @binding(0) var input: texture_2d<f32>;
-@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
-`;
+    line(`// Inputs and outputs.`);
+    line(`@group(0) @binding(0) var input: texture_2d<f32>;`);
+    line(`@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;`);
     if (input_type === "image_sample") {
-        wgsl += `@group(0) @binding(2) var input_sampler: sampler;
-`;
+        line(`@group(0) @binding(2) var input_sampler: sampler;`);
     }
     // Emit storage for prefetched data if enabled.
     if (prefetch === "workgroup") {
         if (!const_radius) {
             return "Error: prefetching requires a constant radius.";
         }
-        wgsl += `\n// Prefetch storage.
-const kPrefetchWidth = kWorkgroupSizeX + 2*${radius_expr};
-const kPrefetchHeight = kWorkgroupSizeY + 2*${radius_expr};
-var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;
-`;
+        line();
+        line(`// Prefetch storage.`);
+        line(`const kPrefetchWidth = kWorkgroupSizeX${tilesize_x > 1 ? " * kTileWidth" : ""} + 2*${radius_expr};`);
+        line(`const kPrefetchHeight = kWorkgroupSizeY${tilesize_y > 1 ? " * kTileHeight" : ""} + 2*${radius_expr};`);
+        line(`var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;`);
     }
     // Emit the entry point header.
-    wgsl += `\n// Entry point.
-@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>,
-        @builtin(local_invocation_id)  lid: vec3<u32>) {
-  let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));
-`;
-    // Emit code to prefetch required data if prefetching is enabled, and load the center pixel.
+    line();
+    line(`// Entry point.`);
+    line(`@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)`);
+    line(`fn main(@builtin(global_invocation_id) gid: vec3<u32>,`);
+    line(`        @builtin(local_invocation_id)  lid: vec3<u32>) {`);
+    indent++;
+    line(`let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));`);
+    // Prefetch all of the data required by the workgroup if prefetching is enabled.
     if (prefetch === "workgroup") {
-        wgsl += `
-  // Prefetch the required data to workgroup storage.
-  let prefetch_base = vec2i(gid.xy - lid.xy) - ${radius_expr};
-  for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {
-    for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`;
+        line();
+        line(`// Prefetch the required data to workgroup storage.`);
+        line(`let prefetch_base = vec2i(gid.xy - lid.xy)${tilesize ? ` * ${tilesize} ` : ""} - ${radius_expr};`);
+        line(`for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {`);
+        indent++;
+        line(`for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`);
+        indent++;
         if (input_type === "image_sample") {
-            wgsl += `
-      let coord = (vec2f(prefetch_base + vec2i(i, j)) + vec2f(0.5, 0.5)) * step;
-      prefetch_data[i + j*kPrefetchWidth] = textureSampleLevel(input, input_sampler, coord, 0);`;
+            line(`let coord = (vec2f(prefetch_base + vec2(i, j)) + vec2(0.5, 0.5)) * step;`);
+            line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
         }
         else {
-            wgsl += `
-      let coord = prefetch_base + vec2i(i, j);
-      prefetch_data[i + j*kPrefetchWidth] = textureLoad(input, coord, 0);`;
+            line(`let coord = prefetch_base + vec2(i, j);`);
+            line(`let pixel = textureLoad(input, coord, 0);`);
         }
-        wgsl += `
+        line(`prefetch_data[i + j*kPrefetchWidth] = pixel;`);
+        indent--;
+        line(`}`);
+        indent--;
+        line(`}`);
+        line(`workgroupBarrier();`);
     }
-  }
-  workgroupBarrier();
-
-  let center_value = prefetch_data[lid.x+${radius_expr} + (lid.y+${radius_expr})*kPrefetchWidth];
-`;
+    line();
+    // Emit the tile loops if necessary.
+    let tx = "0";
+    let ty = "0";
+    if (tilesize_y > 1) {
+        ty = "ty";
+        line(`for (var ty = 0u; ty < kTileHeight; ty++) {`);
+        indent++;
+    }
+    if (tilesize_x > 1) {
+        tx = "tx";
+        line(`for (var tx = 0u; tx < kTileWidth; tx++) {`);
+        indent++;
+    }
+    // Load the center pixel.
+    line(`let center = gid.xy${tilesize ? ` * ${tilesize} + vec2(${tx}, ${ty})` : ""};`);
+    if (prefetch === "workgroup") {
+        line(`let px = lid.x${tilesize_x > 1 ? `*kTileWidth + tx` : ""} + ${radius_expr};`);
+        line(`let py = lid.y${tilesize_y > 1 ? `*kTileHeight + ty` : ""} + ${radius_expr};`);
+        line(`let center_value = prefetch_data[px + py*kPrefetchWidth];`);
     }
     else {
         if (input_type === "image_sample") {
-            wgsl += `
-  let center = (vec2f(gid.xy) + vec2f(0.5, 0.5)) * step;
-  let center_value = textureSampleLevel(input, input_sampler, center, 0);
-`;
+            line(`let center_norm = (vec2f(center) + vec2(0.5, 0.5)) * step;`);
+            line(`let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);`);
         }
         else {
-            wgsl += `
-  let center_value = textureLoad(input, gid.xy, 0);
-`;
+            line(`let center_value = textureLoad(input, center, 0);`);
         }
     }
-    // Emit the body of the shader.
-    wgsl += `
-  var coeff = 0.f;
-  var sum = vec4f();
-  for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {
-    for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {
-      var weight = 0.f;
-`;
+    line();
+    line(`var coeff = 0.f;`);
+    line(`var sum = vec4f();`);
+    // Emit the main filter loop.
+    line(`for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {`);
+    indent++;
+    line(`for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {`);
+    indent++;
+    line(`var weight = 0.f;`);
+    line();
     // Load the pixel from either the texture or the prefetch store.
     if (prefetch === "workgroup") {
-        wgsl += `
-      let x = i32(lid.x) + i + ${radius_expr};
-      let y = i32(lid.y) + j + ${radius_expr};
-      let pixel = prefetch_data[x + y*kPrefetchWidth];
-`;
+        line(`let px = i32(lid.x${tilesize_x > 1 ? `*kTileWidth + tx` : ""}) + i + ${radius_expr};`);
+        line(`let py = i32(lid.y${tilesize_y > 1 ? `*kTileHeight + ty` : ""}) + j + ${radius_expr};`);
+        line(`let pixel = prefetch_data[px + py*kPrefetchWidth];`);
     }
     else {
         if (input_type === "image_sample") {
-            wgsl += `
-      let coord = center + (vec2f(f32(i), f32(j)) * step);
-      let pixel = textureSampleLevel(input, input_sampler, coord, 0);
-`;
+            line(`let coord = center_norm + (vec2(f32(i), f32(j)) * step);`);
+            line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
         }
         else {
-            wgsl += `
-      let pixel = textureLoad(input, vec2i(gid.xy) + vec2i(i, j), 0);
-`;
+            line(`let pixel = textureLoad(input, vec2i(center) + vec2(i, j), 0);`);
         }
     }
     // Emit the spatial coefficient calculation.
+    line();
     if (spatial_coeffs === "inline") {
-        wgsl += `
-      weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};
-`;
+        line(`weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};`);
     }
     else if (spatial_coeffs === "lut_uniform") {
-        wgsl += `
-      weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;
-`;
+        line(`weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;`);
     }
     else if (spatial_coeffs === "lut_const") {
-        wgsl += `
-      weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];
-`;
+        line(`weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];`);
     }
-    // Emit the weight calculations.
-    wgsl += `
-      let diff = pixel.xyz - center_value.xyz;
-      weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};
-
-      weight   = exp(weight);
-      coeff   += weight;
-      sum     += weight * pixel;
-    }
-  }
-`;
+    // Emit the radiometric difference calculation.
+    line();
+    line(`let diff = pixel.xyz - center_value.xyz;`);
+    line(`weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};`);
+    line();
+    // Finalize the weight and accumulate into the coefficient and sum.
+    line(`weight   = exp(weight);`);
+    line(`coeff   += weight;`);
+    line(`sum     += weight * pixel;`);
+    indent--;
+    line(`}`);
+    indent--;
+    line(`}`);
     // Emit the predicated store for the result.
-    wgsl += `
-  let result = vec4f(sum.xyz / coeff, center_value.w);
-  if (all(gid.xy < vec2u(${width_expr}, ${height_expr}))) {
-    textureStore(output, gid.xy, result);
-  }
-}`;
+    line();
+    line(`let result = vec4(sum.xyz / coeff, center_value.w);`);
+    line(`if (all(center < vec2(${width_expr}, ${height_expr}))) {`);
+    line(`  textureStore(output, center, result);`);
+    line(`}`);
+    indent--;
+    line(`}`);
+    // End the tile loops if necessary.
+    if (tilesize_x > 1) {
+        indent--;
+        line(`}`);
+    }
+    if (tilesize_y > 1) {
+        indent--;
+        line(`}`);
+    }
     return wgsl;
 }
 /// Update and display the WGSL shader.
@@ -740,6 +781,14 @@ document.querySelector("#wgsize_x").addEventListener("change", () => {
 });
 document.querySelector("#wgsize_y").addEventListener("change", () => {
     wgsize_y = +document.getElementById("wgsize_y").value;
+    UpdateShader();
+});
+document.querySelector("#tilesize_x").addEventListener("change", () => {
+    tilesize_x = +document.getElementById("tilesize_x").value;
+    UpdateShader();
+});
+document.querySelector("#tilesize_y").addEventListener("change", () => {
+    tilesize_y = +document.getElementById("tilesize_y").value;
     UpdateShader();
 });
 document.querySelector("#input_type").addEventListener("change", () => {
