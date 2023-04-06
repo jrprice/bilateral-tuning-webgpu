@@ -122,7 +122,7 @@ async function LoadInputImage() {
 }
 
 /// Run the benchmark.
-const Run = async () => {
+const Run = async (): Promise<boolean> => {
   SetStatus("Setting up...");
 
   // Cycle through different input images to reduce the likelihood of caching.
@@ -172,7 +172,7 @@ const Run = async () => {
 
   // Set values for any parameters that are not being embedded as constants.
   let uniform_member_index = 0;
-  if (!const_sigma_domain) {
+  if (!const_sigma_domain && spatial_coeffs === "inline") {
     param_values_f32[uniform_member_index++] = -0.5 / (sigma_domain * sigma_domain);
   }
   if (!const_sigma_range) {
@@ -297,7 +297,69 @@ const Run = async () => {
 
   DisplayTexture(output, "output_canvas");
 
-  VerifyResult(output);
+  return VerifyResult(output);
+};
+
+/// Test all configs to check for issues.
+const Test = async () => {
+  // Helper to change a radio button selection.
+  function ConstUniformRadio(name: string, uniform: boolean) {
+    if (uniform) {
+      (<HTMLInputElement>document.getElementById(`uniform_${name}`)).click();
+    } else {
+      (<HTMLInputElement>document.getElementById(`const_${name}`)).click();
+    }
+  }
+
+  // Helper to change a drop-down selection.
+  function SelectDropDown(name: string, value: string) {
+    const select = <HTMLInputElement>document.getElementById(name);
+    select.value = value;
+    select.dispatchEvent(new Event("change"));
+  }
+
+  // TODO: test non-square workgroup sizes
+  for (const tile_width of ["1", "2"]) {
+    SelectDropDown("tilesize_x", tile_width);
+    for (const tile_height of ["1", "2"]) {
+      SelectDropDown("tilesize_y", tile_height);
+      for (const uniform_sigma_domain of [true, false]) {
+        ConstUniformRadio("sd", uniform_sigma_domain);
+        for (const uniform_sigma_range of [true, false]) {
+          ConstUniformRadio("sr", uniform_sigma_range);
+          for (const uniform_radius of [true, false]) {
+            ConstUniformRadio("radius", uniform_radius);
+            for (const uniform_width of [true, false]) {
+              ConstUniformRadio("width", uniform_width);
+              for (const uniform_height of [true, false]) {
+                ConstUniformRadio("height", uniform_height);
+                for (const input_type of ["image_sample", "image_load"]) {
+                  SelectDropDown("input_type", input_type);
+                  for (const prefetch of ["none", "workgroup"]) {
+                    SelectDropDown("prefetch", prefetch);
+                    for (const spatial_coeffs of ["inline", "lut_uniform", "lut_const"]) {
+                      SelectDropDown("spatial_coeffs", spatial_coeffs);
+
+                      // Skip invalid configs.
+                      if (uniform_radius && prefetch !== "none") {
+                        continue;
+                      }
+
+                      // Run the config and check the result.
+                      if (!(await Run())) {
+                        SetStatus("Config failed!", "#FF0000");
+                        return;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 };
 
 /// Generate the WGSL shader.
@@ -339,12 +401,14 @@ function GenerateShader(): string {
   let radius_expr;
   let width_expr;
   let height_expr;
-  if (const_sigma_domain) {
-    constants += `const kInverseSigmaDomainSquared = ${-0.5 / (sigma_domain * sigma_domain)};\n`;
-    inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
-  } else {
-    uniform_members += `\n  inv_sigma_domain_sq: f32,`;
-    inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
+  if (spatial_coeffs === "inline") {
+    if (const_sigma_domain) {
+      constants += `const kInverseSigmaDomainSquared = ${-0.5 / (sigma_domain * sigma_domain)};\n`;
+      inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
+    } else {
+      uniform_members += `\n  inv_sigma_domain_sq: f32,`;
+      inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
+    }
   }
   if (const_sigma_range) {
     constants += `const kInverseSigmaRangeSquared = ${-0.5 / (sigma_range * sigma_range)};\n`;
@@ -743,7 +807,7 @@ async function GenerateReferenceResult() {
 }
 
 /// Verify a result against the reference result.
-async function VerifyResult(output: GPUTexture) {
+async function VerifyResult(output: GPUTexture): Promise<boolean> {
   // Generate the reference result.
   await GenerateReferenceResult();
 
@@ -819,6 +883,8 @@ async function VerifyResult(output: GPUTexture) {
 
   // Display the image diff.
   DisplayImageData(diff_data, "diff_canvas");
+
+  return num_errors == 0;
 }
 
 // Initialize WebGPU.
@@ -827,8 +893,9 @@ await InitWebGPU();
 // Display the default shader.
 UpdateShader();
 
-// Add an event handler for the 'Run' button.
+// Add event handlers for the buttons.
 document.querySelector("#run").addEventListener("click", Run);
+document.querySelector("#test").addEventListener("click", Test);
 
 // Add an event handler for the power preference selector.
 document.querySelector("#powerpref").addEventListener("change", () => {
