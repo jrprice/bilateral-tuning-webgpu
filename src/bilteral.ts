@@ -6,19 +6,21 @@ let sigma_domain = 3.0;
 let sigma_range = 0.2;
 let radius = 2;
 
-// The shader parameters.
-let wgsize_x = 8;
-let wgsize_y = 8;
-let tilesize_x = 1;
-let tilesize_y = 1;
-let const_sigma_domain: boolean;
-let const_sigma_range: boolean;
-let const_radius: boolean;
-let const_width: boolean;
-let const_height: boolean;
-let input_type = "image_sample";
-let prefetch = "none";
-let spatial_coeffs = "inline";
+/// A ShaderConfig object represents a set of implementation decisions.
+interface ShaderConfig {
+  wgsize_x: number;
+  wgsize_y: number;
+  tilesize_x: number;
+  tilesize_y: number;
+  const_sigma_domain: boolean;
+  const_sigma_range: boolean;
+  const_radius: boolean;
+  const_width: boolean;
+  const_height: boolean;
+  input_type: string;
+  prefetch: string;
+  spatial_coeffs: string;
+}
 
 // The input image data.
 let width: number;
@@ -123,6 +125,11 @@ async function LoadInputImage() {
 
 /// Run the benchmark.
 const Run = async (): Promise<boolean> => {
+  return RunConfig(GetShaderConfigFromForm());
+};
+
+/// Run the filter for a specific shader config.
+async function RunConfig(config: ShaderConfig): Promise<boolean> {
   SetStatus("Setting up...");
 
   // Cycle through different input images to reduce the likelihood of caching.
@@ -172,25 +179,25 @@ const Run = async (): Promise<boolean> => {
 
   // Set values for any parameters that are not being embedded as constants.
   let uniform_member_index = 0;
-  if (!const_sigma_domain && spatial_coeffs === "inline") {
+  if (!config.const_sigma_domain && config.spatial_coeffs === "inline") {
     param_values_f32[uniform_member_index++] = -0.5 / (sigma_domain * sigma_domain);
   }
-  if (!const_sigma_range) {
+  if (!config.const_sigma_range) {
     param_values_f32[uniform_member_index++] = -0.5 / (sigma_range * sigma_range);
   }
-  if (!const_radius) {
+  if (!config.const_radius) {
     param_values_u32[uniform_member_index++] = radius;
   }
-  if (!const_width) {
+  if (!config.const_width) {
     param_values_u32[uniform_member_index++] = width;
   }
-  if (!const_height) {
+  if (!config.const_height) {
     param_values_u32[uniform_member_index++] = height;
   }
   parameters.unmap();
 
   // Generate the shader and create the compute pipeline.
-  const module = device.createShaderModule({ code: GenerateShader() });
+  const module = device.createShaderModule({ code: GenerateShader(config) });
   const pipeline = device.createComputePipeline({
     compute: { module, entryPoint: "main" },
     layout: "auto",
@@ -204,7 +211,7 @@ const Run = async (): Promise<boolean> => {
       { binding: 0, resource: inputs[i].createView() },
       { binding: 1, resource: output.createView() },
     ];
-    if (input_type === "image_sample") {
+    if (config.input_type === "image_sample") {
       entries.push({
         binding: 2,
         resource: device.createSampler({
@@ -225,7 +232,7 @@ const Run = async (): Promise<boolean> => {
 
   // Create a uniform buffer for the spatial coefficient LUT if necessary.
   let spatial_coeff_lut_buffer = null;
-  if (spatial_coeffs === "lut_uniform") {
+  if (config.spatial_coeffs === "lut_uniform") {
     let buffer_size = spatial_coeff_lut.length * 16;
     spatial_coeff_lut_buffer = device.createBuffer({
       size: buffer_size,
@@ -257,8 +264,8 @@ const Run = async (): Promise<boolean> => {
   }
 
   // Determine the number of workgroups.
-  const pixels_per_group_x = wgsize_x * tilesize_x;
-  const pixels_per_group_y = wgsize_y * tilesize_y;
+  const pixels_per_group_x = config.wgsize_x * config.tilesize_x;
+  const pixels_per_group_y = config.wgsize_y * config.tilesize_y;
   const group_count_x = Math.floor((width + pixels_per_group_x - 1) / pixels_per_group_x);
   const group_count_y = Math.floor((height + pixels_per_group_y - 1) / pixels_per_group_y);
 
@@ -298,7 +305,7 @@ const Run = async (): Promise<boolean> => {
   DisplayTexture(output, "output_canvas");
 
   return VerifyResult(output);
-};
+}
 
 /// Test all configs to check for issues.
 const Test = async () => {
@@ -371,7 +378,7 @@ const Test = async () => {
 };
 
 /// Generate the WGSL shader.
-function GenerateShader(): string {
+function GenerateShader(config: ShaderConfig): string {
   let indent = 0;
   let wgsl = "";
   let constants = "";
@@ -384,20 +391,20 @@ function GenerateShader(): string {
   }
 
   // Generate constants for the workgroup size.
-  constants += `const kWorkgroupSizeX = ${wgsize_x};\n`;
-  constants += `const kWorkgroupSizeY = ${wgsize_y};\n`;
+  constants += `const kWorkgroupSizeX = ${config.wgsize_x};\n`;
+  constants += `const kWorkgroupSizeY = ${config.wgsize_y};\n`;
 
   // Generate constants for the tile size if necessary.
-  if (tilesize_x > 1) {
-    constants += `const kTileWidth = ${tilesize_x};\n`;
+  if (config.tilesize_x > 1) {
+    constants += `const kTileWidth = ${config.tilesize_x};\n`;
   }
-  if (tilesize_y > 1) {
-    constants += `const kTileHeight = ${tilesize_y};\n`;
+  if (config.tilesize_y > 1) {
+    constants += `const kTileHeight = ${config.tilesize_y};\n`;
   }
   let tilesize = "";
-  if (tilesize_x > 1 || tilesize_y > 1) {
-    const width = tilesize_x > 1 ? "kTileWidth" : "1";
-    const height = tilesize_y > 1 ? "kTileHeight" : "1";
+  if (config.tilesize_x > 1 || config.tilesize_y > 1) {
+    const width = config.tilesize_x > 1 ? "kTileWidth" : "1";
+    const height = config.tilesize_y > 1 ? "kTileHeight" : "1";
     tilesize = `kTileSize`;
     constants += `const ${tilesize} = vec2(${width}, ${height});\n`;
   }
@@ -409,8 +416,8 @@ function GenerateShader(): string {
   let radius_expr;
   let width_expr;
   let height_expr;
-  if (spatial_coeffs === "inline") {
-    if (const_sigma_domain) {
+  if (config.spatial_coeffs === "inline") {
+    if (config.const_sigma_domain) {
       constants += `const kInverseSigmaDomainSquared = ${-0.5 / (sigma_domain * sigma_domain)};\n`;
       inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
     } else {
@@ -418,28 +425,28 @@ function GenerateShader(): string {
       inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
     }
   }
-  if (const_sigma_range) {
+  if (config.const_sigma_range) {
     constants += `const kInverseSigmaRangeSquared = ${-0.5 / (sigma_range * sigma_range)};\n`;
     inv_sigma_range_sq_expr = "kInverseSigmaRangeSquared";
   } else {
     uniform_members += `\n  inv_sigma_range_sq: f32,`;
     inv_sigma_range_sq_expr = "params.inv_sigma_range_sq";
   }
-  if (const_radius) {
+  if (config.const_radius) {
     constants += `const kRadius = ${radius};\n`;
     radius_expr = "kRadius";
   } else {
     uniform_members += `\n  radius: i32,`;
     radius_expr = "params.radius";
   }
-  if (const_width) {
+  if (config.const_width) {
     constants += `const kWidth = ${width};\n`;
     width_expr = "kWidth";
   } else {
     uniform_members += `\n  width: u32,`;
     width_expr = "params.width";
   }
-  if (const_height) {
+  if (config.const_height) {
     constants += `const kHeight = ${height};\n`;
     height_expr = "kHeight";
   } else {
@@ -462,11 +469,11 @@ function GenerateShader(): string {
       spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * norm;
     }
   }
-  if (spatial_coeffs === "lut_uniform") {
+  if (config.spatial_coeffs === "lut_uniform") {
     const lut_type = `array<vec4f, ${spatial_coeff_lut.length}>`;
     uniforms += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : ${lut_type};
 `;
-  } else if (spatial_coeffs === "lut_const") {
+  } else if (config.spatial_coeffs === "lut_const") {
     constants += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
     for (let j = 0; j < radius + 1; j++) {
       constants += `\n  `;
@@ -490,25 +497,25 @@ function GenerateShader(): string {
   line(`// Inputs and outputs.`);
   line(`@group(0) @binding(0) var input: texture_2d<f32>;`);
   line(`@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;`);
-  if (input_type === "image_sample") {
+  if (config.input_type === "image_sample") {
     line(`@group(0) @binding(2) var input_sampler: sampler;`);
   }
 
   // Emit storage for prefetched data if enabled.
-  if (prefetch === "workgroup") {
-    if (!const_radius) {
+  if (config.prefetch === "workgroup") {
+    if (!config.const_radius) {
       return "Error: prefetching requires a constant radius.";
     }
     line();
     line(`// Prefetch storage.`);
     line(
       `const kPrefetchWidth = kWorkgroupSizeX${
-        tilesize_x > 1 ? " * kTileWidth" : ""
+        config.tilesize_x > 1 ? " * kTileWidth" : ""
       } + 2*${radius_expr};`
     );
     line(
       `const kPrefetchHeight = kWorkgroupSizeY${
-        tilesize_y > 1 ? " * kTileHeight" : ""
+        config.tilesize_y > 1 ? " * kTileHeight" : ""
       } + 2*${radius_expr};`
     );
     line(`var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;`);
@@ -524,7 +531,7 @@ function GenerateShader(): string {
   line(`let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));`);
 
   // Prefetch all of the data required by the workgroup if prefetching is enabled.
-  if (prefetch === "workgroup") {
+  if (config.prefetch === "workgroup") {
     line();
     line(`// Prefetch the required data to workgroup storage.`);
     line(
@@ -536,7 +543,7 @@ function GenerateShader(): string {
     indent++;
     line(`for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`);
     indent++;
-    if (input_type === "image_sample") {
+    if (config.input_type === "image_sample") {
       line(`let coord = (vec2f(prefetch_base + vec2(i, j)) + vec2(0.5, 0.5)) * step;`);
       line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
     } else {
@@ -556,12 +563,12 @@ function GenerateShader(): string {
   // Emit the tile loops if necessary.
   let tx = "0";
   let ty = "0";
-  if (tilesize_y > 1) {
+  if (config.tilesize_y > 1) {
     ty = "ty";
     line(`for (var ty = 0u; ty < kTileHeight; ty++) {`);
     indent++;
   }
-  if (tilesize_x > 1) {
+  if (config.tilesize_x > 1) {
     tx = "tx";
     line(`for (var tx = 0u; tx < kTileWidth; tx++) {`);
     indent++;
@@ -569,12 +576,12 @@ function GenerateShader(): string {
 
   // Load the center pixel.
   line(`let center = gid.xy${tilesize ? ` * ${tilesize} + vec2(${tx}, ${ty})` : ""};`);
-  if (prefetch === "workgroup") {
-    line(`let px = lid.x${tilesize_x > 1 ? `*kTileWidth + tx` : ""} + ${radius_expr};`);
-    line(`let py = lid.y${tilesize_y > 1 ? `*kTileHeight + ty` : ""} + ${radius_expr};`);
+  if (config.prefetch === "workgroup") {
+    line(`let px = lid.x${config.tilesize_x > 1 ? `*kTileWidth + tx` : ""} + ${radius_expr};`);
+    line(`let py = lid.y${config.tilesize_y > 1 ? `*kTileHeight + ty` : ""} + ${radius_expr};`);
     line(`let center_value = prefetch_data[px + py*kPrefetchWidth];`);
   } else {
-    if (input_type === "image_sample") {
+    if (config.input_type === "image_sample") {
       line(`let center_norm = (vec2f(center) + vec2(0.5, 0.5)) * step;`);
       line(`let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);`);
     } else {
@@ -595,12 +602,16 @@ function GenerateShader(): string {
   line();
 
   // Load the pixel from either the texture or the prefetch store.
-  if (prefetch === "workgroup") {
-    line(`let px = i32(lid.x${tilesize_x > 1 ? `*kTileWidth + tx` : ""}) + i + ${radius_expr};`);
-    line(`let py = i32(lid.y${tilesize_y > 1 ? `*kTileHeight + ty` : ""}) + j + ${radius_expr};`);
+  if (config.prefetch === "workgroup") {
+    line(
+      `let px = i32(lid.x${config.tilesize_x > 1 ? `*kTileWidth + tx` : ""}) + i + ${radius_expr};`
+    );
+    line(
+      `let py = i32(lid.y${config.tilesize_y > 1 ? `*kTileHeight + ty` : ""}) + j + ${radius_expr};`
+    );
     line(`let pixel = prefetch_data[px + py*kPrefetchWidth];`);
   } else {
-    if (input_type === "image_sample") {
+    if (config.input_type === "image_sample") {
       line(`let coord = center_norm + (vec2(f32(i), f32(j)) * step);`);
       line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
     } else {
@@ -610,11 +621,11 @@ function GenerateShader(): string {
 
   // Emit the spatial coefficient calculation.
   line();
-  if (spatial_coeffs === "inline") {
+  if (config.spatial_coeffs === "inline") {
     line(`weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};`);
-  } else if (spatial_coeffs === "lut_uniform") {
+  } else if (config.spatial_coeffs === "lut_uniform") {
     line(`weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;`);
-  } else if (spatial_coeffs === "lut_const") {
+  } else if (config.spatial_coeffs === "lut_const") {
     line(`weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];`);
   }
 
@@ -643,11 +654,11 @@ function GenerateShader(): string {
   line(`}`);
 
   // End the tile loops if necessary.
-  if (tilesize_x > 1) {
+  if (config.tilesize_x > 1) {
     indent--;
     line(`}`);
   }
-  if (tilesize_y > 1) {
+  if (config.tilesize_y > 1) {
     indent--;
     line(`}`);
   }
@@ -656,11 +667,11 @@ function GenerateShader(): string {
 }
 
 /// Update and display the WGSL shader.
-function UpdateShader() {
+function UpdateShader(config: ShaderConfig) {
   const shader_display = document.getElementById("shader");
   shader_display.style.width = `0px`;
   shader_display.style.height = `0px`;
-  shader_display.textContent = GenerateShader();
+  shader_display.textContent = GenerateShader(config);
   shader_display.style.width = `${shader_display.scrollWidth}px`;
   shader_display.style.height = `${shader_display.scrollHeight}px`;
 }
@@ -895,11 +906,30 @@ async function VerifyResult(output: GPUTexture): Promise<boolean> {
   return num_errors == 0;
 }
 
+/// Get the shader config from the HTML input elements.
+function GetShaderConfigFromForm(): ShaderConfig {
+  let config: ShaderConfig = {
+    wgsize_x: +(<HTMLInputElement>document.getElementById("wgsize_x")).value,
+    wgsize_y: +(<HTMLInputElement>document.getElementById("wgsize_y")).value,
+    tilesize_x: +(<HTMLInputElement>document.getElementById("tilesize_x")).value,
+    tilesize_y: +(<HTMLInputElement>document.getElementById("tilesize_y")).value,
+    const_sigma_domain: (<HTMLInputElement>document.getElementById("const_sd")).checked,
+    const_sigma_range: (<HTMLInputElement>document.getElementById("const_sr")).checked,
+    const_radius: (<HTMLInputElement>document.getElementById("const_radius")).checked,
+    const_width: (<HTMLInputElement>document.getElementById("const_width")).checked,
+    const_height: (<HTMLInputElement>document.getElementById("const_height")).checked,
+    input_type: (<HTMLInputElement>document.getElementById("input_type")).value,
+    prefetch: (<HTMLInputElement>document.getElementById("prefetch")).value,
+    spatial_coeffs: (<HTMLInputElement>document.getElementById("spatial_coeffs")).value,
+  };
+  return config;
+}
+
 // Initialize WebGPU.
 await InitWebGPU();
 
 // Display the default shader.
-UpdateShader();
+UpdateShader(GetShaderConfigFromForm());
 
 // Add event handlers for the buttons.
 document.querySelector("#run").addEventListener("click", Run);
@@ -920,79 +950,62 @@ document.querySelector("#image_file").addEventListener("change", () => {
 document.querySelector("#radius").addEventListener("change", () => {
   radius = +(<HTMLInputElement>document.getElementById("radius")).value;
   reference_data = null;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 
 // Add event handlers for the shader parameter radio buttons.
 document.querySelector("#const_sd").addEventListener("change", () => {
-  const_sigma_domain = true;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#uniform_sd").addEventListener("change", () => {
-  const_sigma_domain = false;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#const_sr").addEventListener("change", () => {
-  const_sigma_range = true;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#uniform_sr").addEventListener("change", () => {
-  const_sigma_range = false;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#const_radius").addEventListener("change", () => {
-  const_radius = true;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#uniform_radius").addEventListener("change", () => {
-  const_radius = false;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#const_width").addEventListener("change", () => {
-  const_width = true;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#uniform_width").addEventListener("change", () => {
-  const_width = false;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#const_height").addEventListener("change", () => {
-  const_height = true;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#uniform_height").addEventListener("change", () => {
-  const_height = false;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 
 // Add event handlers for the shader parameter drop-down menus.
 document.querySelector("#wgsize_x").addEventListener("change", () => {
-  wgsize_x = +(<HTMLInputElement>document.getElementById("wgsize_x")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#wgsize_y").addEventListener("change", () => {
-  wgsize_y = +(<HTMLInputElement>document.getElementById("wgsize_y")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#tilesize_x").addEventListener("change", () => {
-  tilesize_x = +(<HTMLInputElement>document.getElementById("tilesize_x")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#tilesize_y").addEventListener("change", () => {
-  tilesize_y = +(<HTMLInputElement>document.getElementById("tilesize_y")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#input_type").addEventListener("change", () => {
-  input_type = (<HTMLInputElement>document.getElementById("input_type")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#prefetch").addEventListener("change", () => {
-  prefetch = (<HTMLInputElement>document.getElementById("prefetch")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 document.querySelector("#spatial_coeffs").addEventListener("change", () => {
-  spatial_coeffs = (<HTMLInputElement>document.getElementById("spatial_coeffs")).value;
-  UpdateShader();
+  UpdateShader(GetShaderConfigFromForm());
 });
 
 // Load the default input image.
