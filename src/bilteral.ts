@@ -37,6 +37,9 @@ let adapter: GPUAdapter;
 let device: GPUDevice;
 let input_image_staging: GPUTexture;
 
+// The shader config runner object.
+let runner: ConfigRunner;
+
 function SetStatus(str: string, color = "#000000") {
   document.getElementById("status").textContent = str;
   document.getElementById("status").style.color = color;
@@ -124,566 +127,10 @@ async function LoadInputImage() {
   ClearCanvas("diff_canvas");
   reference_data = null;
 
+  // Prepare the config runner for the new input image.
+  runner.SetupTextures();
+
   SetStatus("Ready.");
-}
-
-/// Run the benchmark.
-const Run = async (): Promise<boolean> => {
-  SetRuntime("");
-  return RunConfig({ config: GetShaderConfigFromForm() });
-};
-
-/// Run the filter for a specific shader config.
-async function RunConfig(params: { config: ShaderConfig; test?: boolean }): Promise<boolean> {
-  SetStatus("Setting up...");
-
-  const config = params.config;
-
-  // Cycle through different input images to reduce the likelihood of caching.
-  const kNumInputImages = 3;
-
-  // Create the input and output textures.
-  const inputs = [];
-  const commands = device.createCommandEncoder();
-  for (let i = 0; i < kNumInputImages; i++) {
-    inputs.push(
-      device.createTexture({
-        size: { width, height },
-        format: "rgba8unorm",
-        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
-      })
-    );
-
-    // Copy the input image to the input texture.
-    commands.copyTextureToTexture(
-      { texture: input_image_staging },
-      { texture: inputs[i] },
-      {
-        width,
-        height,
-      }
-    );
-  }
-  const output = device.createTexture({
-    size: { width, height },
-    format: "rgba8unorm",
-    usage:
-      GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
-  });
-
-  // Wait for copies to complete.
-  device.queue.submit([commands.finish()]);
-
-  // Set up the filter parameters.
-  const parameters = device.createBuffer({
-    size: 20,
-    usage: GPUBufferUsage.UNIFORM,
-    mappedAtCreation: true,
-  });
-  const param_values = parameters.getMappedRange();
-  const param_values_f32 = new Float32Array(param_values);
-  const param_values_u32 = new Uint32Array(param_values);
-
-  // Set values for any parameters that are not being embedded as constants.
-  let uniform_member_index = 0;
-  if (!config.const_sigma_domain && config.spatial_coeffs === "inline") {
-    param_values_f32[uniform_member_index++] = -0.5 / (sigma_domain * sigma_domain);
-  }
-  if (!config.const_sigma_range) {
-    param_values_f32[uniform_member_index++] = -0.5 / (sigma_range * sigma_range);
-  }
-  if (!config.const_radius) {
-    param_values_u32[uniform_member_index++] = radius;
-  }
-  if (!config.const_width) {
-    param_values_u32[uniform_member_index++] = width;
-  }
-  if (!config.const_height) {
-    param_values_u32[uniform_member_index++] = height;
-  }
-  parameters.unmap();
-
-  // Generate the shader and create the compute pipeline.
-  const module = device.createShaderModule({ code: GenerateShader(config) });
-  const pipeline = device.createComputePipeline({
-    compute: { module, entryPoint: "main" },
-    layout: "auto",
-  });
-
-  // Create a bind group for group index 0 for each input image.
-  const bind_group_0 = [];
-  for (let i = 0; i < kNumInputImages; i++) {
-    let entries: GPUBindGroupEntry[];
-    entries = [
-      { binding: 0, resource: inputs[i].createView() },
-      { binding: 1, resource: output.createView() },
-    ];
-    if (config.input_type === "image_sample") {
-      entries.push({
-        binding: 2,
-        resource: device.createSampler({
-          addressModeU: "clamp-to-edge",
-          addressModeV: "clamp-to-edge",
-          minFilter: "nearest",
-          magFilter: "nearest",
-        }),
-      });
-    }
-    bind_group_0.push(
-      device.createBindGroup({
-        entries,
-        layout: pipeline.getBindGroupLayout(0),
-      })
-    );
-  }
-
-  // Create a uniform buffer for the spatial coefficient LUT if necessary.
-  let spatial_coeff_lut_buffer = null;
-  if (config.spatial_coeffs === "lut_uniform") {
-    let buffer_size = spatial_coeff_lut.length * 16;
-    spatial_coeff_lut_buffer = device.createBuffer({
-      size: buffer_size,
-      usage: GPUBufferUsage.UNIFORM,
-      mappedAtCreation: true,
-    });
-
-    const dst = new Float32Array(spatial_coeff_lut_buffer.getMappedRange());
-    for (let i = 0; i < spatial_coeff_lut.length; i++) {
-      dst[i * 4] = spatial_coeff_lut[i];
-    }
-    spatial_coeff_lut_buffer.unmap();
-  }
-
-  // Create the bind group for the uniform parameters if necessary.
-  let bind_group_1 = null;
-  let bind_group_1_entries = [];
-  if (uniform_member_index > 0) {
-    bind_group_1_entries.push({ binding: 0, resource: { buffer: parameters } });
-  }
-  if (spatial_coeff_lut_buffer) {
-    bind_group_1_entries.push({ binding: 1, resource: { buffer: spatial_coeff_lut_buffer } });
-  }
-  if (bind_group_1_entries.length > 0) {
-    bind_group_1 = device.createBindGroup({
-      entries: bind_group_1_entries,
-      layout: pipeline.getBindGroupLayout(1),
-    });
-  }
-
-  // Determine the number of workgroups.
-  const pixels_per_group_x = config.wgsize_x * config.tilesize_x;
-  const pixels_per_group_y = config.wgsize_y * config.tilesize_y;
-  const group_count_x = Math.floor((width + pixels_per_group_x - 1) / pixels_per_group_x);
-  const group_count_y = Math.floor((height + pixels_per_group_y - 1) / pixels_per_group_y);
-
-  // Helper to enqueue `n` back-to-back runs of the shader.
-  function Enqueue(n: number) {
-    const commands = device.createCommandEncoder();
-    const pass = commands.beginComputePass();
-    pass.setPipeline(pipeline);
-    if (bind_group_1) {
-      // Only set the bind group for the uniform parameters if it was created.
-      pass.setBindGroup(1, bind_group_1);
-    }
-    for (let i = 0; i < n; i++) {
-      pass.setBindGroup(0, bind_group_0[n % kNumInputImages]);
-      pass.dispatchWorkgroups(group_count_x, group_count_y);
-    }
-    pass.end();
-    device.queue.submit([commands.finish()]);
-  }
-
-  // Warm up run.
-  Enqueue(1);
-  await device.queue.onSubmittedWorkDone();
-
-  if (!params.test) {
-    // Timed runs.
-    SetStatus("Running...");
-    const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
-    const start = performance.now();
-    Enqueue(itrs);
-    await device.queue.onSubmittedWorkDone();
-    const end = performance.now();
-    const elapsed = end - start;
-    const fps = (itrs / elapsed) * 1000;
-    SetRuntime(`Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`);
-
-    DisplayTexture(output, "output_canvas");
-  }
-
-  return VerifyResult({ output, config, quick: params.test });
-}
-
-/// Test all configs to check for issues.
-const Test = async () => {
-  SetRuntime("");
-
-  // Helper to change a radio button selection.
-  function ConstUniformRadio(name: string, uniform: boolean) {
-    if (uniform) {
-      (<HTMLInputElement>document.getElementById(`uniform_${name}`)).click();
-    } else {
-      (<HTMLInputElement>document.getElementById(`const_${name}`)).click();
-    }
-  }
-
-  // Helper to change a drop-down selection.
-  function SelectDropDown(name: string, value: string) {
-    const select = <HTMLInputElement>document.getElementById(name);
-    select.value = value;
-    select.dispatchEvent(new Event("change"));
-  }
-
-  const start = performance.now();
-  let num_configs = 0;
-
-  // TODO: test non-square workgroup sizes
-  for (const tile_width of ["1", "2"]) {
-    SelectDropDown("tilesize_x", tile_width);
-    for (const tile_height of ["1", "2"]) {
-      SelectDropDown("tilesize_y", tile_height);
-      for (const uniform_sigma_domain of [true, false]) {
-        ConstUniformRadio("sd", uniform_sigma_domain);
-        for (const uniform_sigma_range of [true, false]) {
-          ConstUniformRadio("sr", uniform_sigma_range);
-          for (const uniform_radius of [true, false]) {
-            ConstUniformRadio("radius", uniform_radius);
-            for (const uniform_width of [true, false]) {
-              ConstUniformRadio("width", uniform_width);
-              for (const uniform_height of [true, false]) {
-                ConstUniformRadio("height", uniform_height);
-                for (const input_type of ["image_sample", "image_load"]) {
-                  SelectDropDown("input_type", input_type);
-                  for (const prefetch of ["none", "workgroup"]) {
-                    SelectDropDown("prefetch", prefetch);
-                    for (const spatial_coeffs of ["inline", "lut_uniform", "lut_const"]) {
-                      SelectDropDown("spatial_coeffs", spatial_coeffs);
-
-                      // Skip invalid configs.
-                      if (uniform_radius && prefetch !== "none") {
-                        continue;
-                      }
-
-                      // Run the config and check the result.
-                      if (!(await RunConfig({ config: GetShaderConfigFromForm(), test: true }))) {
-                        SetStatus("Config failed!", "#FF0000");
-                        return;
-                      }
-                      num_configs++;
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  const end = performance.now();
-  const elapsed = end - start;
-  SetRuntime(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
-};
-
-/// Generate the WGSL shader.
-function GenerateShader(config: ShaderConfig): string {
-  let indent = 0;
-  let wgsl = "";
-  let constants = "";
-  let structures = "";
-  let uniforms = "";
-
-  // Helper to add a line to the shader respecting the current indentation.
-  function line(str = "") {
-    wgsl += "  ".repeat(indent) + str + "\n";
-  }
-
-  // Generate constants for the workgroup size.
-  constants += `const kWorkgroupSizeX = ${config.wgsize_x};\n`;
-  constants += `const kWorkgroupSizeY = ${config.wgsize_y};\n`;
-
-  // Generate constants for the tile size if necessary.
-  if (config.tilesize_x > 1) {
-    constants += `const kTileWidth = ${config.tilesize_x};\n`;
-  }
-  if (config.tilesize_y > 1) {
-    constants += `const kTileHeight = ${config.tilesize_y};\n`;
-  }
-  let tilesize = "";
-  if (config.tilesize_x > 1 || config.tilesize_y > 1) {
-    const width = config.tilesize_x > 1 ? "kTileWidth" : "1";
-    const height = config.tilesize_y > 1 ? "kTileHeight" : "1";
-    tilesize = `kTileSize`;
-    constants += `const ${tilesize} = vec2(${width}, ${height});\n`;
-  }
-
-  // Generate the uniform struct members and the expressions for the filter parameters.
-  let uniform_members = "";
-  let inv_sigma_domain_sq_expr;
-  let inv_sigma_range_sq_expr;
-  let radius_expr;
-  let width_expr;
-  let height_expr;
-  if (config.spatial_coeffs === "inline") {
-    if (config.const_sigma_domain) {
-      constants += `const kInverseSigmaDomainSquared = ${-0.5 / (sigma_domain * sigma_domain)};\n`;
-      inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
-    } else {
-      uniform_members += `\n  inv_sigma_domain_sq: f32,`;
-      inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
-    }
-  }
-  if (config.const_sigma_range) {
-    constants += `const kInverseSigmaRangeSquared = ${-0.5 / (sigma_range * sigma_range)};\n`;
-    inv_sigma_range_sq_expr = "kInverseSigmaRangeSquared";
-  } else {
-    uniform_members += `\n  inv_sigma_range_sq: f32,`;
-    inv_sigma_range_sq_expr = "params.inv_sigma_range_sq";
-  }
-  if (config.const_radius) {
-    constants += `const kRadius = ${radius};\n`;
-    radius_expr = "kRadius";
-  } else {
-    uniform_members += `\n  radius: i32,`;
-    radius_expr = "params.radius";
-  }
-  if (config.const_width) {
-    constants += `const kWidth = ${width};\n`;
-    width_expr = "kWidth";
-  } else {
-    uniform_members += `\n  width: u32,`;
-    width_expr = "params.width";
-  }
-  if (config.const_height) {
-    constants += `const kHeight = ${height};\n`;
-    height_expr = "kHeight";
-  } else {
-    uniform_members += `\n  height: u32,`;
-    height_expr = "params.height";
-  }
-
-  // Emit the uniform struct and variable if there is at least one member.
-  if (uniform_members) {
-    structures += `struct Parameters {${uniform_members}
-}\n`;
-    uniforms += "@group(1) @binding(0) var<uniform> params: Parameters;\n";
-  }
-
-  // Generate and emit the spatial coefficient LUT if enabled.
-  spatial_coeff_lut = new Float32Array((radius + 1) * (radius + 1));
-  for (let j = 0; j < radius + 1; j++) {
-    for (let i = 0; i < radius + 1; i++) {
-      let norm = (i * i + j * j) / (sigma_domain * sigma_domain);
-      spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * norm;
-    }
-  }
-  if (config.spatial_coeffs === "lut_uniform") {
-    const lut_type = `array<vec4f, ${spatial_coeff_lut.length}>`;
-    uniforms += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : ${lut_type};
-`;
-  } else if (config.spatial_coeffs === "lut_const") {
-    constants += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
-    for (let j = 0; j < radius + 1; j++) {
-      constants += `\n  `;
-      for (let i = 0; i < radius + 1; i++) {
-        constants += `${spatial_coeff_lut[i + j * (radius + 1)]}f, `;
-      }
-    }
-    constants += `\n);
-`;
-  }
-
-  line(`// Constants.\n${constants}`);
-  if (structures) {
-    line(`// Structures.\n${structures}`);
-  }
-  if (uniforms) {
-    line(`// Uniforms.\n${uniforms}`);
-  }
-
-  // Emit the global resources.
-  line(`// Inputs and outputs.`);
-  line(`@group(0) @binding(0) var input: texture_2d<f32>;`);
-  line(`@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;`);
-  if (config.input_type === "image_sample") {
-    line(`@group(0) @binding(2) var input_sampler: sampler;`);
-  }
-
-  // Emit storage for prefetched data if enabled.
-  if (config.prefetch === "workgroup") {
-    if (!config.const_radius) {
-      return "Error: prefetching requires a constant radius.";
-    }
-    line();
-    line(`// Prefetch storage.`);
-    line(
-      `const kPrefetchWidth = kWorkgroupSizeX${
-        config.tilesize_x > 1 ? " * kTileWidth" : ""
-      } + 2*${radius_expr};`
-    );
-    line(
-      `const kPrefetchHeight = kWorkgroupSizeY${
-        config.tilesize_y > 1 ? " * kTileHeight" : ""
-      } + 2*${radius_expr};`
-    );
-    line(`var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;`);
-  }
-
-  // Emit the entry point header.
-  line();
-  line(`// Entry point.`);
-  line(`@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)`);
-  line(`fn main(@builtin(global_invocation_id) gid: vec3<u32>,`);
-  line(`        @builtin(local_invocation_id)  lid: vec3<u32>) {`);
-  indent++;
-  line(`let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));`);
-
-  // Prefetch all of the data required by the workgroup if prefetching is enabled.
-  if (config.prefetch === "workgroup") {
-    line();
-    line(`// Prefetch the required data to workgroup storage.`);
-    line(
-      `let prefetch_base = vec2i(gid.xy - lid.xy)${
-        tilesize ? ` * ${tilesize} ` : ""
-      } - ${radius_expr};`
-    );
-    line(`for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {`);
-    indent++;
-    line(`for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`);
-    indent++;
-    if (config.input_type === "image_sample") {
-      line(`let coord = (vec2f(prefetch_base + vec2(i, j)) + vec2(0.5, 0.5)) * step;`);
-      line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
-    } else {
-      line(`let coord = prefetch_base + vec2(i, j);`);
-      line(`let pixel = textureLoad(input, coord, 0);`);
-    }
-    line(`prefetch_data[i + j*kPrefetchWidth] = pixel;`);
-    indent--;
-    line(`}`);
-    indent--;
-    line(`}`);
-    line(`workgroupBarrier();`);
-  }
-
-  line();
-
-  // Emit the tile loops if necessary.
-  let tx = "0";
-  let ty = "0";
-  if (config.tilesize_y > 1) {
-    ty = "ty";
-    line(`for (var ty = 0u; ty < kTileHeight; ty++) {`);
-    indent++;
-  }
-  if (config.tilesize_x > 1) {
-    tx = "tx";
-    line(`for (var tx = 0u; tx < kTileWidth; tx++) {`);
-    indent++;
-  }
-
-  // Load the center pixel.
-  line(`let center = gid.xy${tilesize ? ` * ${tilesize} + vec2(${tx}, ${ty})` : ""};`);
-  if (config.prefetch === "workgroup") {
-    line(`let px = lid.x${config.tilesize_x > 1 ? `*kTileWidth + tx` : ""} + ${radius_expr};`);
-    line(`let py = lid.y${config.tilesize_y > 1 ? `*kTileHeight + ty` : ""} + ${radius_expr};`);
-    line(`let center_value = prefetch_data[px + py*kPrefetchWidth];`);
-  } else {
-    if (config.input_type === "image_sample") {
-      line(`let center_norm = (vec2f(center) + vec2(0.5, 0.5)) * step;`);
-      line(`let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);`);
-    } else {
-      line(`let center_value = textureLoad(input, center, 0);`);
-    }
-  }
-
-  line();
-  line(`var coeff = 0.f;`);
-  line(`var sum = vec4f();`);
-
-  // Emit the main filter loop.
-  line(`for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {`);
-  indent++;
-  line(`for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {`);
-  indent++;
-  line(`var weight = 0.f;`);
-  line();
-
-  // Load the pixel from either the texture or the prefetch store.
-  if (config.prefetch === "workgroup") {
-    line(
-      `let px = i32(lid.x${config.tilesize_x > 1 ? `*kTileWidth + tx` : ""}) + i + ${radius_expr};`
-    );
-    line(
-      `let py = i32(lid.y${config.tilesize_y > 1 ? `*kTileHeight + ty` : ""}) + j + ${radius_expr};`
-    );
-    line(`let pixel = prefetch_data[px + py*kPrefetchWidth];`);
-  } else {
-    if (config.input_type === "image_sample") {
-      line(`let coord = center_norm + (vec2(f32(i), f32(j)) * step);`);
-      line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
-    } else {
-      line(`let pixel = textureLoad(input, vec2i(center) + vec2(i, j), 0);`);
-    }
-  }
-
-  // Emit the spatial coefficient calculation.
-  line();
-  if (config.spatial_coeffs === "inline") {
-    line(`weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};`);
-  } else if (config.spatial_coeffs === "lut_uniform") {
-    line(`weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;`);
-  } else if (config.spatial_coeffs === "lut_const") {
-    line(`weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];`);
-  }
-
-  // Emit the radiometric difference calculation.
-  line();
-  line(`let diff = pixel.xyz - center_value.xyz;`);
-  line(`weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};`);
-  line();
-
-  // Finalize the weight and accumulate into the coefficient and sum.
-  line(`weight   = exp(weight);`);
-  line(`coeff   += weight;`);
-  line(`sum     += weight * pixel;`);
-  indent--;
-  line(`}`);
-  indent--;
-  line(`}`);
-
-  // Emit the predicated store for the result.
-  line();
-  line(`let result = vec4(sum.xyz / coeff, center_value.w);`);
-  line(`if (all(center < vec2(${width_expr}, ${height_expr}))) {`);
-  line(`  textureStore(output, center, result);`);
-  line(`}`);
-  indent--;
-  line(`}`);
-
-  // End the tile loops if necessary.
-  if (config.tilesize_x > 1) {
-    indent--;
-    line(`}`);
-  }
-  if (config.tilesize_y > 1) {
-    indent--;
-    line(`}`);
-  }
-
-  return wgsl;
-}
-
-/// Update and display the WGSL shader.
-function UpdateShader(config: ShaderConfig) {
-  const shader_display = document.getElementById("shader");
-  shader_display.style.width = `0px`;
-  shader_display.style.height = `0px`;
-  shader_display.textContent = GenerateShader(config);
-  shader_display.style.width = `${shader_display.scrollWidth}px`;
-  shader_display.style.height = `${shader_display.scrollHeight}px`;
 }
 
 /// Display a texture to a canvas.
@@ -757,184 +204,6 @@ function DisplayImageData(data: Uint8Array, canvas_id: string) {
   canvas.getContext("2d").putImageData(imgdata, 0, 0);
 }
 
-/// Generate the reference result on the CPU.
-async function GenerateReferenceResult() {
-  if (reference_data) {
-    return;
-  }
-
-  SetStatus("Generating reference result...");
-
-  const row_stride = Math.floor((width + 255) / 256) * 256;
-
-  // Create a staging buffer for copying the image to the CPU.
-  const buffer = device.createBuffer({
-    size: row_stride * height * 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-
-  // Copy the input image to the staging buffer.
-  const commands = device.createCommandEncoder();
-  commands.copyTextureToBuffer(
-    { texture: input_image_staging },
-    { buffer, bytesPerRow: row_stride * 4 },
-    {
-      width,
-      height,
-    }
-  );
-  device.queue.submit([commands.finish()]);
-  await buffer.mapAsync(GPUMapMode.READ);
-  const input_data = new Uint8Array(buffer.getMappedRange());
-
-  // Generate the reference output.
-  reference_data = new Uint8Array(width * height * 4);
-  const inv_255 = 1 / 255.0;
-  const inv_sigma_domain_sq = -0.5 / (sigma_domain * sigma_domain);
-  const inv_sigma_range_sq = -0.5 / (sigma_range * sigma_range);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const center_x = input_data[(x + y * row_stride) * 4 + 0] * inv_255;
-      const center_y = input_data[(x + y * row_stride) * 4 + 1] * inv_255;
-      const center_z = input_data[(x + y * row_stride) * 4 + 2] * inv_255;
-      const center_w = input_data[(x + y * row_stride) * 4 + 3];
-
-      let coeff = 0.0;
-      let sum = [0, 0, 0];
-      for (let j = -radius; j <= radius; j++) {
-        for (let i = -radius; i <= radius; i++) {
-          let xi = Math.min(Math.max(x + i, 0), width - 1);
-          let yj = Math.min(Math.max(y + j, 0), height - 1);
-          let pixel_x = input_data[(xi + yj * row_stride) * 4 + 0] * inv_255;
-          let pixel_y = input_data[(xi + yj * row_stride) * 4 + 1] * inv_255;
-          let pixel_z = input_data[(xi + yj * row_stride) * 4 + 2] * inv_255;
-
-          let weight = (i * i + j * j) * inv_sigma_domain_sq;
-
-          let dist_x = pixel_x - center_x;
-          let dist_y = pixel_y - center_y;
-          let dist_z = pixel_z - center_z;
-          weight += (dist_x * dist_x + dist_y * dist_y + dist_z * dist_z) * inv_sigma_range_sq;
-
-          weight = Math.exp(weight);
-          coeff += weight;
-          sum[0] += weight * pixel_x;
-          sum[1] += weight * pixel_y;
-          sum[2] += weight * pixel_z;
-        }
-      }
-      reference_data[(x + y * width) * 4 + 0] = (sum[0] / coeff) * 255.0;
-      reference_data[(x + y * width) * 4 + 1] = (sum[1] / coeff) * 255.0;
-      reference_data[(x + y * width) * 4 + 2] = (sum[2] / coeff) * 255.0;
-      reference_data[(x + y * width) * 4 + 3] = center_w;
-    }
-  }
-
-  buffer.unmap();
-
-  DisplayImageData(reference_data, "reference_canvas");
-}
-
-/// Verify a result against the reference result.
-async function VerifyResult(params: {
-  output: GPUTexture;
-  config: ShaderConfig;
-  quick?: boolean;
-}): Promise<boolean> {
-  // Generate the reference result.
-  await GenerateReferenceResult();
-
-  SetStatus("Verifying result...");
-
-  const row_stride = Math.floor((width + 255) / 256) * 256;
-
-  // Create a staging buffer for copying the image to the CPU.
-  const buffer = device.createBuffer({
-    size: row_stride * height * 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-
-  // Copy the output image to the staging buffer.
-  const commands = device.createCommandEncoder();
-  commands.copyTextureToBuffer(
-    { texture: params.output },
-    { buffer, bytesPerRow: row_stride * 4 },
-    {
-      width,
-      height,
-    }
-  );
-  device.queue.submit([commands.finish()]);
-  await buffer.mapAsync(GPUMapMode.READ);
-  const result_data = new Uint8Array(buffer.getMappedRange());
-
-  // Check for errors and generate the diff map.
-  let num_errors = 0;
-  let max_error = 0;
-  const diff_data = new Uint8Array(width * height * 4);
-  const x_region = params.quick
-    ? 2 * (params.config.wgsize_x * params.config.tilesize_x) + radius
-    : width;
-  const y_region = params.quick
-    ? 2 * (params.config.wgsize_y * params.config.tilesize_y) + radius
-    : height;
-  for (let y = 0; y < height; y++) {
-    if (y >= y_region && y < height - y_region) {
-      continue;
-    }
-    for (let x = 0; x < width; x++) {
-      if (x >= x_region && x < width - x_region) {
-        continue;
-      }
-
-      // Use green for a match.
-      diff_data[(x + y * width) * 4 + 0] = 0;
-      diff_data[(x + y * width) * 4 + 1] = 255;
-      diff_data[(x + y * width) * 4 + 2] = 0;
-      diff_data[(x + y * width) * 4 + 3] = 255;
-
-      let has_error = false;
-      for (let c = 0; c < 4; c++) {
-        const result = result_data[(x + y * row_stride) * 4 + c];
-        const reference = reference_data[(x + y * width) * 4 + c];
-        const diff = Math.abs(result - reference);
-        if (diff > 1) {
-          // Use red for large errors, orange for smaller errors.
-          if (diff > 20) {
-            diff_data[(x + y * width) * 4 + 0] = 255;
-            diff_data[(x + y * width) * 4 + 1] = 0;
-          } else {
-            diff_data[(x + y * width) * 4 + 0] = 255;
-            diff_data[(x + y * width) * 4 + 1] = 165;
-          }
-          max_error = Math.max(max_error, diff);
-          if (num_errors < 10) {
-            console.log(`error at ${x},${y},${c}: ${result} != ${reference}`);
-          }
-          if (!has_error) {
-            num_errors++;
-            has_error = true;
-          }
-        }
-      }
-    }
-  }
-  buffer.unmap();
-
-  if (num_errors) {
-    SetStatus(`${num_errors} errors found (maxdiff=${max_error}).`, "#FF0000");
-  } else {
-    SetStatus("Verification succeeded.");
-  }
-
-  if (!params.quick) {
-    // Display the image diff.
-    DisplayImageData(diff_data, "diff_canvas");
-  }
-
-  return num_errors == 0;
-}
-
 /// Get the shader config from the HTML input elements.
 function GetShaderConfigFromForm(): ShaderConfig {
   let config: ShaderConfig = {
@@ -954,8 +223,766 @@ function GetShaderConfigFromForm(): ShaderConfig {
   return config;
 }
 
+/// A class used to benchmark and test different shader configurations.
+class ConfigRunner {
+  // Cycle through different input images to reduce the likelihood of caching.
+  static readonly kNumInputImages = 3;
+  input_textures: Array<GPUTexture> = new Array<GPUTexture>(ConfigRunner.kNumInputImages);
+  output_texture: GPUTexture;
+
+  /// Set up the input and output textures.
+  SetupTextures() {
+    // Create the input textures and copy the input image to them.
+    const commands = device.createCommandEncoder();
+    for (let i = 0; i < ConfigRunner.kNumInputImages; i++) {
+      this.input_textures[i] = device.createTexture({
+        size: { width, height },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+      });
+
+      // Copy the input image to the input texture.
+      commands.copyTextureToTexture(
+        { texture: input_image_staging },
+        { texture: this.input_textures[i] },
+        {
+          width,
+          height,
+        }
+      );
+    }
+    device.queue.submit([commands.finish()]);
+
+    // Create the output texture.
+    this.output_texture = device.createTexture({
+      size: { width, height },
+      format: "rgba8unorm",
+      usage:
+        GPUTextureUsage.COPY_SRC |
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+
+  /// Run the filter for a specific shader config.
+  async RunConfig(params: { config: ShaderConfig; test?: boolean }): Promise<boolean> {
+    SetStatus("Setting up...");
+
+    const config = params.config;
+
+    // Set up the filter parameters.
+    const parameters = device.createBuffer({
+      size: 20,
+      usage: GPUBufferUsage.UNIFORM,
+      mappedAtCreation: true,
+    });
+    const param_values = parameters.getMappedRange();
+    const param_values_f32 = new Float32Array(param_values);
+    const param_values_u32 = new Uint32Array(param_values);
+
+    // Set values for any parameters that are not being embedded as constants.
+    let uniform_member_index = 0;
+    if (!config.const_sigma_domain && config.spatial_coeffs === "inline") {
+      param_values_f32[uniform_member_index++] = -0.5 / (sigma_domain * sigma_domain);
+    }
+    if (!config.const_sigma_range) {
+      param_values_f32[uniform_member_index++] = -0.5 / (sigma_range * sigma_range);
+    }
+    if (!config.const_radius) {
+      param_values_u32[uniform_member_index++] = radius;
+    }
+    if (!config.const_width) {
+      param_values_u32[uniform_member_index++] = width;
+    }
+    if (!config.const_height) {
+      param_values_u32[uniform_member_index++] = height;
+    }
+    parameters.unmap();
+
+    // Generate the shader and create the compute pipeline.
+    const module = device.createShaderModule({ code: this.GenerateShader(config) });
+    const pipeline = device.createComputePipeline({
+      compute: { module, entryPoint: "main" },
+      layout: "auto",
+    });
+
+    // Create a bind group for group index 0 for each input image.
+    const bind_group_0 = [];
+    for (let i = 0; i < ConfigRunner.kNumInputImages; i++) {
+      let entries: GPUBindGroupEntry[];
+      entries = [
+        { binding: 0, resource: this.input_textures[i].createView() },
+        { binding: 1, resource: this.output_texture.createView() },
+      ];
+      if (config.input_type === "image_sample") {
+        entries.push({
+          binding: 2,
+          resource: device.createSampler({
+            addressModeU: "clamp-to-edge",
+            addressModeV: "clamp-to-edge",
+            minFilter: "nearest",
+            magFilter: "nearest",
+          }),
+        });
+      }
+      bind_group_0.push(
+        device.createBindGroup({
+          entries,
+          layout: pipeline.getBindGroupLayout(0),
+        })
+      );
+    }
+
+    // Create a uniform buffer for the spatial coefficient LUT if necessary.
+    let spatial_coeff_lut_buffer = null;
+    if (config.spatial_coeffs === "lut_uniform") {
+      let buffer_size = spatial_coeff_lut.length * 16;
+      spatial_coeff_lut_buffer = device.createBuffer({
+        size: buffer_size,
+        usage: GPUBufferUsage.UNIFORM,
+        mappedAtCreation: true,
+      });
+
+      const dst = new Float32Array(spatial_coeff_lut_buffer.getMappedRange());
+      for (let i = 0; i < spatial_coeff_lut.length; i++) {
+        dst[i * 4] = spatial_coeff_lut[i];
+      }
+      spatial_coeff_lut_buffer.unmap();
+    }
+
+    // Create the bind group for the uniform parameters if necessary.
+    let bind_group_1 = null;
+    let bind_group_1_entries = [];
+    if (uniform_member_index > 0) {
+      bind_group_1_entries.push({ binding: 0, resource: { buffer: parameters } });
+    }
+    if (spatial_coeff_lut_buffer) {
+      bind_group_1_entries.push({ binding: 1, resource: { buffer: spatial_coeff_lut_buffer } });
+    }
+    if (bind_group_1_entries.length > 0) {
+      bind_group_1 = device.createBindGroup({
+        entries: bind_group_1_entries,
+        layout: pipeline.getBindGroupLayout(1),
+      });
+    }
+
+    // Determine the number of workgroups.
+    const pixels_per_group_x = config.wgsize_x * config.tilesize_x;
+    const pixels_per_group_y = config.wgsize_y * config.tilesize_y;
+    const group_count_x = Math.floor((width + pixels_per_group_x - 1) / pixels_per_group_x);
+    const group_count_y = Math.floor((height + pixels_per_group_y - 1) / pixels_per_group_y);
+
+    // Helper to enqueue `n` back-to-back runs of the shader.
+    function Enqueue(n: number) {
+      const commands = device.createCommandEncoder();
+      const pass = commands.beginComputePass();
+      pass.setPipeline(pipeline);
+      if (bind_group_1) {
+        // Only set the bind group for the uniform parameters if it was created.
+        pass.setBindGroup(1, bind_group_1);
+      }
+      for (let i = 0; i < n; i++) {
+        pass.setBindGroup(0, bind_group_0[n % ConfigRunner.kNumInputImages]);
+        pass.dispatchWorkgroups(group_count_x, group_count_y);
+      }
+      pass.end();
+      device.queue.submit([commands.finish()]);
+    }
+
+    // Warm up run.
+    Enqueue(1);
+    await device.queue.onSubmittedWorkDone();
+
+    if (!params.test) {
+      // Timed runs.
+      SetStatus("Running...");
+      const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
+      const start = performance.now();
+      Enqueue(itrs);
+      await device.queue.onSubmittedWorkDone();
+      const end = performance.now();
+      const elapsed = end - start;
+      const fps = (itrs / elapsed) * 1000;
+      SetRuntime(`Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`);
+
+      DisplayTexture(this.output_texture, "output_canvas");
+    }
+
+    return this.VerifyResult({ output: this.output_texture, config, quick: params.test });
+  }
+
+  /// Generate the WGSL shader.
+  GenerateShader(config: ShaderConfig): string {
+    let indent = 0;
+    let wgsl = "";
+    let constants = "";
+    let structures = "";
+    let uniforms = "";
+
+    // Helper to add a line to the shader respecting the current indentation.
+    function line(str = "") {
+      wgsl += "  ".repeat(indent) + str + "\n";
+    }
+
+    // Generate constants for the workgroup size.
+    constants += `const kWorkgroupSizeX = ${config.wgsize_x};\n`;
+    constants += `const kWorkgroupSizeY = ${config.wgsize_y};\n`;
+
+    // Generate constants for the tile size if necessary.
+    if (config.tilesize_x > 1) {
+      constants += `const kTileWidth = ${config.tilesize_x};\n`;
+    }
+    if (config.tilesize_y > 1) {
+      constants += `const kTileHeight = ${config.tilesize_y};\n`;
+    }
+    let tilesize = "";
+    if (config.tilesize_x > 1 || config.tilesize_y > 1) {
+      const width = config.tilesize_x > 1 ? "kTileWidth" : "1";
+      const height = config.tilesize_y > 1 ? "kTileHeight" : "1";
+      tilesize = `kTileSize`;
+      constants += `const ${tilesize} = vec2(${width}, ${height});\n`;
+    }
+
+    // Generate the uniform struct members and the expressions for the filter parameters.
+    let uniform_members = "";
+    let inv_sigma_domain_sq_expr;
+    let inv_sigma_range_sq_expr;
+    let radius_expr;
+    let width_expr;
+    let height_expr;
+    if (config.spatial_coeffs === "inline") {
+      if (config.const_sigma_domain) {
+        constants += `const kInverseSigmaDomainSquared = ${
+          -0.5 / (sigma_domain * sigma_domain)
+        };\n`;
+        inv_sigma_domain_sq_expr = "kInverseSigmaDomainSquared";
+      } else {
+        uniform_members += `\n  inv_sigma_domain_sq: f32,`;
+        inv_sigma_domain_sq_expr = "params.inv_sigma_domain_sq";
+      }
+    }
+    if (config.const_sigma_range) {
+      constants += `const kInverseSigmaRangeSquared = ${-0.5 / (sigma_range * sigma_range)};\n`;
+      inv_sigma_range_sq_expr = "kInverseSigmaRangeSquared";
+    } else {
+      uniform_members += `\n  inv_sigma_range_sq: f32,`;
+      inv_sigma_range_sq_expr = "params.inv_sigma_range_sq";
+    }
+    if (config.const_radius) {
+      constants += `const kRadius = ${radius};\n`;
+      radius_expr = "kRadius";
+    } else {
+      uniform_members += `\n  radius: i32,`;
+      radius_expr = "params.radius";
+    }
+    if (config.const_width) {
+      constants += `const kWidth = ${width};\n`;
+      width_expr = "kWidth";
+    } else {
+      uniform_members += `\n  width: u32,`;
+      width_expr = "params.width";
+    }
+    if (config.const_height) {
+      constants += `const kHeight = ${height};\n`;
+      height_expr = "kHeight";
+    } else {
+      uniform_members += `\n  height: u32,`;
+      height_expr = "params.height";
+    }
+
+    // Emit the uniform struct and variable if there is at least one member.
+    if (uniform_members) {
+      structures += `struct Parameters {${uniform_members}
+}\n`;
+      uniforms += "@group(1) @binding(0) var<uniform> params: Parameters;\n";
+    }
+
+    // Generate and emit the spatial coefficient LUT if enabled.
+    spatial_coeff_lut = new Float32Array((radius + 1) * (radius + 1));
+    for (let j = 0; j < radius + 1; j++) {
+      for (let i = 0; i < radius + 1; i++) {
+        let norm = (i * i + j * j) / (sigma_domain * sigma_domain);
+        spatial_coeff_lut[i + j * (radius + 1)] = -0.5 * norm;
+      }
+    }
+    if (config.spatial_coeffs === "lut_uniform") {
+      const lut_type = `array<vec4f, ${spatial_coeff_lut.length}>`;
+      uniforms += `@group(1) @binding(1) var<uniform> spatial_coeff_lut : ${lut_type};
+`;
+    } else if (config.spatial_coeffs === "lut_const") {
+      constants += `const kSpatialCoeffLUT = array<f32, ${spatial_coeff_lut.length}>(`;
+      for (let j = 0; j < radius + 1; j++) {
+        constants += `\n  `;
+        for (let i = 0; i < radius + 1; i++) {
+          constants += `${spatial_coeff_lut[i + j * (radius + 1)]}f, `;
+        }
+      }
+      constants += `\n);
+`;
+    }
+
+    line(`// Constants.\n${constants}`);
+    if (structures) {
+      line(`// Structures.\n${structures}`);
+    }
+    if (uniforms) {
+      line(`// Uniforms.\n${uniforms}`);
+    }
+
+    // Emit the global resources.
+    line(`// Inputs and outputs.`);
+    line(`@group(0) @binding(0) var input: texture_2d<f32>;`);
+    line(`@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;`);
+    if (config.input_type === "image_sample") {
+      line(`@group(0) @binding(2) var input_sampler: sampler;`);
+    }
+
+    // Emit storage for prefetched data if enabled.
+    if (config.prefetch === "workgroup") {
+      if (!config.const_radius) {
+        return "Error: prefetching requires a constant radius.";
+      }
+      line();
+      line(`// Prefetch storage.`);
+      line(
+        `const kPrefetchWidth = kWorkgroupSizeX${
+          config.tilesize_x > 1 ? " * kTileWidth" : ""
+        } + 2*${radius_expr};`
+      );
+      line(
+        `const kPrefetchHeight = kWorkgroupSizeY${
+          config.tilesize_y > 1 ? " * kTileHeight" : ""
+        } + 2*${radius_expr};`
+      );
+      line(`var<workgroup> prefetch_data: array<vec4f, kPrefetchWidth * kPrefetchHeight>;`);
+    }
+
+    // Emit the entry point header.
+    line();
+    line(`// Entry point.`);
+    line(`@compute @workgroup_size(kWorkgroupSizeX, kWorkgroupSizeY)`);
+    line(`fn main(@builtin(global_invocation_id) gid: vec3<u32>,`);
+    line(`        @builtin(local_invocation_id)  lid: vec3<u32>) {`);
+    indent++;
+    line(`let step = vec2f(1.f / f32(${width_expr}), 1.f / f32(${height_expr}));`);
+
+    // Prefetch all of the data required by the workgroup if prefetching is enabled.
+    if (config.prefetch === "workgroup") {
+      line();
+      line(`// Prefetch the required data to workgroup storage.`);
+      line(
+        `let prefetch_base = vec2i(gid.xy - lid.xy)${
+          tilesize ? ` * ${tilesize} ` : ""
+        } - ${radius_expr};`
+      );
+      line(`for (var j = i32(lid.y); j < kPrefetchHeight; j += kWorkgroupSizeY) {`);
+      indent++;
+      line(`for (var i = i32(lid.x); i < kPrefetchWidth; i += kWorkgroupSizeX) {`);
+      indent++;
+      if (config.input_type === "image_sample") {
+        line(`let coord = (vec2f(prefetch_base + vec2(i, j)) + vec2(0.5, 0.5)) * step;`);
+        line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
+      } else {
+        line(`let coord = prefetch_base + vec2(i, j);`);
+        line(`let pixel = textureLoad(input, coord, 0);`);
+      }
+      line(`prefetch_data[i + j*kPrefetchWidth] = pixel;`);
+      indent--;
+      line(`}`);
+      indent--;
+      line(`}`);
+      line(`workgroupBarrier();`);
+    }
+
+    line();
+
+    // Emit the tile loops if necessary.
+    let tx = "0";
+    let ty = "0";
+    if (config.tilesize_y > 1) {
+      ty = "ty";
+      line(`for (var ty = 0u; ty < kTileHeight; ty++) {`);
+      indent++;
+    }
+    if (config.tilesize_x > 1) {
+      tx = "tx";
+      line(`for (var tx = 0u; tx < kTileWidth; tx++) {`);
+      indent++;
+    }
+
+    // Load the center pixel.
+    line(`let center = gid.xy${tilesize ? ` * ${tilesize} + vec2(${tx}, ${ty})` : ""};`);
+    if (config.prefetch === "workgroup") {
+      line(`let px = lid.x${config.tilesize_x > 1 ? `*kTileWidth + tx` : ""} + ${radius_expr};`);
+      line(`let py = lid.y${config.tilesize_y > 1 ? `*kTileHeight + ty` : ""} + ${radius_expr};`);
+      line(`let center_value = prefetch_data[px + py*kPrefetchWidth];`);
+    } else {
+      if (config.input_type === "image_sample") {
+        line(`let center_norm = (vec2f(center) + vec2(0.5, 0.5)) * step;`);
+        line(`let center_value = textureSampleLevel(input, input_sampler, center_norm, 0);`);
+      } else {
+        line(`let center_value = textureLoad(input, center, 0);`);
+      }
+    }
+
+    line();
+    line(`var coeff = 0.f;`);
+    line(`var sum = vec4f();`);
+
+    // Emit the main filter loop.
+    line(`for (var j = -${radius_expr}; j <= ${radius_expr}; j++) {`);
+    indent++;
+    line(`for (var i = -${radius_expr}; i <= ${radius_expr}; i++) {`);
+    indent++;
+    line(`var weight = 0.f;`);
+    line();
+
+    // Load the pixel from either the texture or the prefetch store.
+    if (config.prefetch === "workgroup") {
+      line(
+        `let px = i32(lid.x${
+          config.tilesize_x > 1 ? `*kTileWidth + tx` : ""
+        }) + i + ${radius_expr};`
+      );
+      line(
+        `let py = i32(lid.y${
+          config.tilesize_y > 1 ? `*kTileHeight + ty` : ""
+        }) + j + ${radius_expr};`
+      );
+      line(`let pixel = prefetch_data[px + py*kPrefetchWidth];`);
+    } else {
+      if (config.input_type === "image_sample") {
+        line(`let coord = center_norm + (vec2(f32(i), f32(j)) * step);`);
+        line(`let pixel = textureSampleLevel(input, input_sampler, coord, 0);`);
+      } else {
+        line(`let pixel = textureLoad(input, vec2i(center) + vec2(i, j), 0);`);
+      }
+    }
+
+    // Emit the spatial coefficient calculation.
+    line();
+    if (config.spatial_coeffs === "inline") {
+      line(`weight   = (f32(i*i) + f32(j*j)) * ${inv_sigma_domain_sq_expr};`);
+    } else if (config.spatial_coeffs === "lut_uniform") {
+      line(`weight   = spatial_coeff_lut[abs(i) + abs(j)*(${radius_expr} + 1)].x;`);
+    } else if (config.spatial_coeffs === "lut_const") {
+      line(`weight   = kSpatialCoeffLUT[abs(i) + abs(j)*(${radius_expr} + 1)];`);
+    }
+
+    // Emit the radiometric difference calculation.
+    line();
+    line(`let diff = pixel.xyz - center_value.xyz;`);
+    line(`weight  += dot(diff, diff) * ${inv_sigma_range_sq_expr};`);
+    line();
+
+    // Finalize the weight and accumulate into the coefficient and sum.
+    line(`weight   = exp(weight);`);
+    line(`coeff   += weight;`);
+    line(`sum     += weight * pixel;`);
+    indent--;
+    line(`}`);
+    indent--;
+    line(`}`);
+
+    // Emit the predicated store for the result.
+    line();
+    line(`let result = vec4(sum.xyz / coeff, center_value.w);`);
+    line(`if (all(center < vec2(${width_expr}, ${height_expr}))) {`);
+    line(`  textureStore(output, center, result);`);
+    line(`}`);
+    indent--;
+    line(`}`);
+
+    // End the tile loops if necessary.
+    if (config.tilesize_x > 1) {
+      indent--;
+      line(`}`);
+    }
+    if (config.tilesize_y > 1) {
+      indent--;
+      line(`}`);
+    }
+
+    return wgsl;
+  }
+
+  /// Generate the reference result on the CPU.
+  async GenerateReferenceResult() {
+    if (reference_data) {
+      return;
+    }
+
+    SetStatus("Generating reference result...");
+
+    const row_stride = Math.floor((width + 255) / 256) * 256;
+
+    // Create a staging buffer for copying the image to the CPU.
+    const buffer = device.createBuffer({
+      size: row_stride * height * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    // Copy the input image to the staging buffer.
+    const commands = device.createCommandEncoder();
+    commands.copyTextureToBuffer(
+      { texture: input_image_staging },
+      { buffer, bytesPerRow: row_stride * 4 },
+      {
+        width,
+        height,
+      }
+    );
+    device.queue.submit([commands.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const input_data = new Uint8Array(buffer.getMappedRange());
+
+    // Generate the reference output.
+    reference_data = new Uint8Array(width * height * 4);
+    const inv_255 = 1 / 255.0;
+    const inv_sigma_domain_sq = -0.5 / (sigma_domain * sigma_domain);
+    const inv_sigma_range_sq = -0.5 / (sigma_range * sigma_range);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const center_x = input_data[(x + y * row_stride) * 4 + 0] * inv_255;
+        const center_y = input_data[(x + y * row_stride) * 4 + 1] * inv_255;
+        const center_z = input_data[(x + y * row_stride) * 4 + 2] * inv_255;
+        const center_w = input_data[(x + y * row_stride) * 4 + 3];
+
+        let coeff = 0.0;
+        let sum = [0, 0, 0];
+        for (let j = -radius; j <= radius; j++) {
+          for (let i = -radius; i <= radius; i++) {
+            let xi = Math.min(Math.max(x + i, 0), width - 1);
+            let yj = Math.min(Math.max(y + j, 0), height - 1);
+            let pixel_x = input_data[(xi + yj * row_stride) * 4 + 0] * inv_255;
+            let pixel_y = input_data[(xi + yj * row_stride) * 4 + 1] * inv_255;
+            let pixel_z = input_data[(xi + yj * row_stride) * 4 + 2] * inv_255;
+
+            let weight = (i * i + j * j) * inv_sigma_domain_sq;
+
+            let dist_x = pixel_x - center_x;
+            let dist_y = pixel_y - center_y;
+            let dist_z = pixel_z - center_z;
+            weight += (dist_x * dist_x + dist_y * dist_y + dist_z * dist_z) * inv_sigma_range_sq;
+
+            weight = Math.exp(weight);
+            coeff += weight;
+            sum[0] += weight * pixel_x;
+            sum[1] += weight * pixel_y;
+            sum[2] += weight * pixel_z;
+          }
+        }
+        reference_data[(x + y * width) * 4 + 0] = (sum[0] / coeff) * 255.0;
+        reference_data[(x + y * width) * 4 + 1] = (sum[1] / coeff) * 255.0;
+        reference_data[(x + y * width) * 4 + 2] = (sum[2] / coeff) * 255.0;
+        reference_data[(x + y * width) * 4 + 3] = center_w;
+      }
+    }
+
+    buffer.unmap();
+
+    DisplayImageData(reference_data, "reference_canvas");
+  }
+
+  /// Verify a result against the reference result.
+  async VerifyResult(params: {
+    output: GPUTexture;
+    config: ShaderConfig;
+    quick?: boolean;
+  }): Promise<boolean> {
+    // Generate the reference result.
+    await this.GenerateReferenceResult();
+
+    SetStatus("Verifying result...");
+
+    const row_stride = Math.floor((width + 255) / 256) * 256;
+
+    // Create a staging buffer for copying the image to the CPU.
+    const buffer = device.createBuffer({
+      size: row_stride * height * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    // Copy the output image to the staging buffer.
+    const commands = device.createCommandEncoder();
+    commands.copyTextureToBuffer(
+      { texture: params.output },
+      { buffer, bytesPerRow: row_stride * 4 },
+      {
+        width,
+        height,
+      }
+    );
+    device.queue.submit([commands.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const result_data = new Uint8Array(buffer.getMappedRange());
+
+    // Check for errors and generate the diff map.
+    let num_errors = 0;
+    let max_error = 0;
+    const diff_data = new Uint8Array(width * height * 4);
+    const x_region = params.quick
+      ? 2 * (params.config.wgsize_x * params.config.tilesize_x) + radius
+      : width;
+    const y_region = params.quick
+      ? 2 * (params.config.wgsize_y * params.config.tilesize_y) + radius
+      : height;
+    for (let y = 0; y < height; y++) {
+      if (y >= y_region && y < height - y_region) {
+        continue;
+      }
+      for (let x = 0; x < width; x++) {
+        if (x >= x_region && x < width - x_region) {
+          continue;
+        }
+
+        // Use green for a match.
+        diff_data[(x + y * width) * 4 + 0] = 0;
+        diff_data[(x + y * width) * 4 + 1] = 255;
+        diff_data[(x + y * width) * 4 + 2] = 0;
+        diff_data[(x + y * width) * 4 + 3] = 255;
+
+        let has_error = false;
+        for (let c = 0; c < 4; c++) {
+          const result = result_data[(x + y * row_stride) * 4 + c];
+          const reference = reference_data[(x + y * width) * 4 + c];
+          const diff = Math.abs(result - reference);
+          if (diff > 1) {
+            // Use red for large errors, orange for smaller errors.
+            if (diff > 20) {
+              diff_data[(x + y * width) * 4 + 0] = 255;
+              diff_data[(x + y * width) * 4 + 1] = 0;
+            } else {
+              diff_data[(x + y * width) * 4 + 0] = 255;
+              diff_data[(x + y * width) * 4 + 1] = 165;
+            }
+            max_error = Math.max(max_error, diff);
+            if (num_errors < 10) {
+              console.log(`error at ${x},${y},${c}: ${result} != ${reference}`);
+            }
+            if (!has_error) {
+              num_errors++;
+              has_error = true;
+            }
+          }
+        }
+      }
+    }
+    buffer.unmap();
+
+    if (num_errors) {
+      SetStatus(`${num_errors} errors found (maxdiff=${max_error}).`, "#FF0000");
+    } else {
+      SetStatus("Verification succeeded.");
+    }
+
+    if (!params.quick) {
+      // Display the image diff.
+      DisplayImageData(diff_data, "diff_canvas");
+    }
+
+    return num_errors == 0;
+  }
+}
+
+/// Run the benchmark.
+const Run = async (): Promise<boolean> => {
+  SetRuntime("");
+  return runner.RunConfig({ config: GetShaderConfigFromForm() });
+};
+
+/// Test all configs to check for issues.
+const Test = async () => {
+  SetRuntime("");
+
+  // Helper to change a radio button selection.
+  function ConstUniformRadio(name: string, uniform: boolean) {
+    if (uniform) {
+      (<HTMLInputElement>document.getElementById(`uniform_${name}`)).click();
+    } else {
+      (<HTMLInputElement>document.getElementById(`const_${name}`)).click();
+    }
+  }
+
+  // Helper to change a drop-down selection.
+  function SelectDropDown(name: string, value: string) {
+    const select = <HTMLInputElement>document.getElementById(name);
+    select.value = value;
+    select.dispatchEvent(new Event("change"));
+  }
+
+  const start = performance.now();
+  let num_configs = 0;
+
+  // TODO: test non-square workgroup sizes
+  for (const tile_width of ["1", "2"]) {
+    SelectDropDown("tilesize_x", tile_width);
+    for (const tile_height of ["1", "2"]) {
+      SelectDropDown("tilesize_y", tile_height);
+      for (const uniform_sigma_domain of [true, false]) {
+        ConstUniformRadio("sd", uniform_sigma_domain);
+        for (const uniform_sigma_range of [true, false]) {
+          ConstUniformRadio("sr", uniform_sigma_range);
+          for (const uniform_radius of [true, false]) {
+            ConstUniformRadio("radius", uniform_radius);
+            for (const uniform_width of [true, false]) {
+              ConstUniformRadio("width", uniform_width);
+              for (const uniform_height of [true, false]) {
+                ConstUniformRadio("height", uniform_height);
+                for (const input_type of ["image_sample", "image_load"]) {
+                  SelectDropDown("input_type", input_type);
+                  for (const prefetch of ["none", "workgroup"]) {
+                    SelectDropDown("prefetch", prefetch);
+                    for (const spatial_coeffs of ["inline", "lut_uniform", "lut_const"]) {
+                      SelectDropDown("spatial_coeffs", spatial_coeffs);
+
+                      // Skip invalid configs.
+                      if (uniform_radius && prefetch !== "none") {
+                        continue;
+                      }
+
+                      // Run the config and check the result.
+                      if (
+                        !(await runner.RunConfig({ config: GetShaderConfigFromForm(), test: true }))
+                      ) {
+                        SetStatus("Config failed!", "#FF0000");
+                        return;
+                      }
+                      num_configs++;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const end = performance.now();
+  const elapsed = end - start;
+  SetRuntime(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
+};
+
+/// Update and display the WGSL shader.
+function UpdateShader(config: ShaderConfig) {
+  const shader_display = document.getElementById("shader");
+  shader_display.style.width = `0px`;
+  shader_display.style.height = `0px`;
+  shader_display.textContent = runner.GenerateShader(config);
+  shader_display.style.width = `${shader_display.scrollWidth}px`;
+  shader_display.style.height = `${shader_display.scrollHeight}px`;
+}
+
 // Initialize WebGPU.
 await InitWebGPU();
+
+// Create the shader config runner.
+runner = new ConfigRunner();
+
+// Load the default input image.
+await LoadInputImage();
 
 // Display the default shader.
 UpdateShader(GetShaderConfigFromForm());
@@ -1036,6 +1063,3 @@ document.querySelector("#prefetch").addEventListener("change", () => {
 document.querySelector("#spatial_coeffs").addEventListener("change", () => {
   UpdateShader(GetShaderConfigFromForm());
 });
-
-// Load the default input image.
-LoadInputImage();
