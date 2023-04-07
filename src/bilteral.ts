@@ -42,6 +42,10 @@ function SetStatus(str: string, color = "#000000") {
   document.getElementById("status").style.color = color;
 }
 
+function SetRuntime(str: string) {
+  document.getElementById("runtime").textContent = str;
+}
+
 /// Initialize the main WebGPU objects.
 async function InitWebGPU() {
   SetStatus("Initializing...");
@@ -125,12 +129,15 @@ async function LoadInputImage() {
 
 /// Run the benchmark.
 const Run = async (): Promise<boolean> => {
-  return RunConfig(GetShaderConfigFromForm());
+  SetRuntime("");
+  return RunConfig({ config: GetShaderConfigFromForm() });
 };
 
 /// Run the filter for a specific shader config.
-async function RunConfig(config: ShaderConfig): Promise<boolean> {
+async function RunConfig(params: { config: ShaderConfig; test?: boolean }): Promise<boolean> {
   SetStatus("Setting up...");
+
+  const config = params.config;
 
   // Cycle through different input images to reduce the likelihood of caching.
   const kNumInputImages = 3;
@@ -290,25 +297,28 @@ async function RunConfig(config: ShaderConfig): Promise<boolean> {
   Enqueue(1);
   await device.queue.onSubmittedWorkDone();
 
-  // Timed runs.
-  SetStatus("Running...");
-  const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
-  const start = performance.now();
-  Enqueue(itrs);
-  await device.queue.onSubmittedWorkDone();
-  const end = performance.now();
-  const elapsed = end - start;
-  const fps = (itrs / elapsed) * 1000;
-  const perf_str = `Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`;
-  document.getElementById("runtime").textContent = perf_str;
+  if (!params.test) {
+    // Timed runs.
+    SetStatus("Running...");
+    const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
+    const start = performance.now();
+    Enqueue(itrs);
+    await device.queue.onSubmittedWorkDone();
+    const end = performance.now();
+    const elapsed = end - start;
+    const fps = (itrs / elapsed) * 1000;
+    SetRuntime(`Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`);
 
-  DisplayTexture(output, "output_canvas");
+    DisplayTexture(output, "output_canvas");
+  }
 
-  return VerifyResult(output);
+  return VerifyResult({ output, config, quick: params.test });
 }
 
 /// Test all configs to check for issues.
 const Test = async () => {
+  SetRuntime("");
+
   // Helper to change a radio button selection.
   function ConstUniformRadio(name: string, uniform: boolean) {
     if (uniform) {
@@ -356,7 +366,7 @@ const Test = async () => {
                       }
 
                       // Run the config and check the result.
-                      if (!(await Run())) {
+                      if (!(await RunConfig({ config: GetShaderConfigFromForm(), test: true }))) {
                         SetStatus("Config failed!", "#FF0000");
                         return;
                       }
@@ -374,7 +384,7 @@ const Test = async () => {
 
   const end = performance.now();
   const elapsed = end - start;
-  console.log(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
+  SetRuntime(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
 };
 
 /// Generate the WGSL shader.
@@ -826,7 +836,11 @@ async function GenerateReferenceResult() {
 }
 
 /// Verify a result against the reference result.
-async function VerifyResult(output: GPUTexture): Promise<boolean> {
+async function VerifyResult(params: {
+  output: GPUTexture;
+  config: ShaderConfig;
+  quick?: boolean;
+}): Promise<boolean> {
   // Generate the reference result.
   await GenerateReferenceResult();
 
@@ -843,7 +857,7 @@ async function VerifyResult(output: GPUTexture): Promise<boolean> {
   // Copy the output image to the staging buffer.
   const commands = device.createCommandEncoder();
   commands.copyTextureToBuffer(
-    { texture: output },
+    { texture: params.output },
     { buffer, bytesPerRow: row_stride * 4 },
     {
       width,
@@ -858,8 +872,21 @@ async function VerifyResult(output: GPUTexture): Promise<boolean> {
   let num_errors = 0;
   let max_error = 0;
   const diff_data = new Uint8Array(width * height * 4);
+  const x_region = params.quick
+    ? 2 * (params.config.wgsize_x * params.config.tilesize_x) + radius
+    : width;
+  const y_region = params.quick
+    ? 2 * (params.config.wgsize_y * params.config.tilesize_y) + radius
+    : height;
   for (let y = 0; y < height; y++) {
+    if (y >= y_region && y < height - y_region) {
+      continue;
+    }
     for (let x = 0; x < width; x++) {
+      if (x >= x_region && x < width - x_region) {
+        continue;
+      }
+
       // Use green for a match.
       diff_data[(x + y * width) * 4 + 0] = 0;
       diff_data[(x + y * width) * 4 + 1] = 255;
@@ -900,8 +927,10 @@ async function VerifyResult(output: GPUTexture): Promise<boolean> {
     SetStatus("Verification succeeded.");
   }
 
-  // Display the image diff.
-  DisplayImageData(diff_data, "diff_canvas");
+  if (!params.quick) {
+    // Display the image diff.
+    DisplayImageData(diff_data, "diff_canvas");
+  }
 
   return num_errors == 0;
 }
