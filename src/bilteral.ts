@@ -318,6 +318,9 @@ const Test = async () => {
     select.dispatchEvent(new Event("change"));
   }
 
+  const start = performance.now();
+  let num_configs = 0;
+
   // TODO: test non-square workgroup sizes
   for (const tile_width of ["1", "2"]) {
     SelectDropDown("tilesize_x", tile_width);
@@ -350,6 +353,7 @@ const Test = async () => {
                         SetStatus("Config failed!", "#FF0000");
                         return;
                       }
+                      num_configs++;
                     }
                   }
                 }
@@ -360,6 +364,10 @@ const Test = async () => {
       }
     }
   }
+
+  const end = performance.now();
+  const elapsed = end - start;
+  console.log(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
 };
 
 /// Generate the WGSL shader.
