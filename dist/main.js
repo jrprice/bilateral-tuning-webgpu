@@ -169,17 +169,15 @@ const Test = async () => {
     // Helper to change a radio button selection.
     function ConstUniformRadio(name, uniform) {
         if (uniform) {
-            document.getElementById(`uniform_${name}`).click();
+            document.getElementById(`uniform_${name}`).checked = true;
         }
         else {
-            document.getElementById(`const_${name}`).click();
+            document.getElementById(`const_${name}`).checked = true;
         }
     }
     // Helper to change a drop-down selection.
     function SelectDropDown(name, value) {
-        const select = document.getElementById(name);
-        select.value = value;
-        select.dispatchEvent(new Event("change"));
+        document.getElementById(name).value = value;
     }
     const start = performance.now();
     let num_configs = 0;
@@ -208,6 +206,7 @@ const Test = async () => {
                                             if (uniform_radius && prefetch !== "none") {
                                                 continue;
                                             }
+                                            UpdateShader(GetShaderConfigFromForm());
                                             // Run the config and check the result.
                                             if (!(await runner.RunConfig({ config: GetShaderConfigFromForm(), test: true }))) {
                                                 SetStatus("Config failed!", "#FF0000");
