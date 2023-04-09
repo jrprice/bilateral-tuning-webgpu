@@ -251,8 +251,10 @@ document.querySelector("#run").addEventListener("click", Run);
 document.querySelector("#test").addEventListener("click", Test);
 // Add an event handler for the power preference selector.
 document.querySelector("#powerpref").addEventListener("change", () => {
-    InitWebGPU();
-    LoadInputImage();
+    InitWebGPU().then(() => {
+        runner = new ConfigRunner(device);
+        LoadInputImage();
+    });
 });
 // Add an event handler for the image selector.
 document.querySelector("#image_file").addEventListener("change", () => {
