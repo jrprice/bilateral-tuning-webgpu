@@ -38,6 +38,11 @@ async function InitWebGPU() {
     powerPreference: powerpref as GPUPowerPreference,
   });
   device = await adapter.requestDevice();
+
+  // Create the shader config runner.
+  runner = new ConfigRunner(device);
+  runner.UpdateStatusCallback = SetStatus;
+  runner.UpdateRuntimeCallback = SetRuntime;
 }
 
 /// Get the texture for the canvas called `id`.
@@ -275,11 +280,6 @@ function UpdateShader(config: ShaderConfig) {
 // Initialize WebGPU.
 await InitWebGPU();
 
-// Create the shader config runner.
-runner = new ConfigRunner(device);
-runner.UpdateStatusCallback = SetStatus;
-runner.UpdateRuntimeCallback = SetRuntime;
-
 // Load the default input image.
 await LoadInputImage();
 
@@ -293,7 +293,6 @@ document.querySelector("#test").addEventListener("click", Test);
 // Add an event handler for the power preference selector.
 document.querySelector("#powerpref").addEventListener("change", () => {
   InitWebGPU().then(() => {
-    runner = new ConfigRunner(device);
     LoadInputImage();
   });
 });
