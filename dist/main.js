@@ -164,17 +164,8 @@ function GetShaderConfigFromForm() {
     };
     return config;
 }
-/// Run the benchmark.
-const Run = async () => {
-    SetRuntime("");
-    await runner.RunConfig({ config: GetShaderConfigFromForm() });
-    DisplayTexture(runner.output_texture, "output_canvas");
-    DisplayImageData(runner.reference_data, "reference_canvas");
-    DisplayImageData(runner.diff_data, "diff_canvas");
-};
-/// Test all configs to check for issues.
-const Test = async () => {
-    SetRuntime("");
+/// Push the shader config to the HTML input elements.
+function PushShaderConfigToForm(config) {
     // Helper to change a radio button selection.
     function ConstUniformRadio(name, uniform) {
         if (uniform) {
@@ -188,36 +179,69 @@ const Test = async () => {
     function SelectDropDown(name, value) {
         document.getElementById(name).value = value;
     }
+    SelectDropDown("wgsize_x", config.wgsize_x.toString());
+    SelectDropDown("wgsize_y", config.wgsize_y.toString());
+    SelectDropDown("tilesize_x", config.tilesize_x.toString());
+    SelectDropDown("tilesize_y", config.tilesize_y.toString());
+    ConstUniformRadio("sd", !config.const_sigma_domain);
+    ConstUniformRadio("sr", !config.const_sigma_range);
+    ConstUniformRadio("radius", !config.const_radius);
+    ConstUniformRadio("width", !config.const_width);
+    ConstUniformRadio("height", !config.const_height);
+    SelectDropDown("input_type", config.input_type);
+    SelectDropDown("prefetch", config.prefetch);
+    SelectDropDown("spatial_coeffs", config.spatial_coeffs);
+}
+/// Run the benchmark.
+const Run = async () => {
+    SetRuntime("");
+    const iterations = +document.getElementById("iterations").value;
+    await runner.RunConfig({ config: GetShaderConfigFromForm(), iterations });
+    DisplayTexture(runner.output_texture, "output_canvas");
+    DisplayImageData(runner.reference_data, "reference_canvas");
+    DisplayImageData(runner.diff_data, "diff_canvas");
+};
+/// Test all configs to check for issues.
+const Test = async () => {
+    SetRuntime("");
     const start = performance.now();
     let num_configs = 0;
+    let config = {};
     // TODO: test non-square workgroup sizes
+    config.wgsize_x = 8;
+    config.wgsize_y = 8;
     for (const tile_width of ["1", "2"]) {
-        SelectDropDown("tilesize_x", tile_width);
+        config.tilesize_x = +tile_width;
         for (const tile_height of ["1", "2"]) {
-            SelectDropDown("tilesize_y", tile_height);
+            config.tilesize_y = +tile_height;
             for (const uniform_sigma_domain of [true, false]) {
-                ConstUniformRadio("sd", uniform_sigma_domain);
+                config.const_sigma_domain = uniform_sigma_domain;
                 for (const uniform_sigma_range of [true, false]) {
-                    ConstUniformRadio("sr", uniform_sigma_range);
+                    config.const_sigma_range = uniform_sigma_range;
                     for (const uniform_radius of [true, false]) {
-                        ConstUniformRadio("radius", uniform_radius);
+                        config.const_radius = uniform_radius;
                         for (const uniform_width of [true, false]) {
-                            ConstUniformRadio("width", uniform_width);
+                            config.const_width = uniform_width;
                             for (const uniform_height of [true, false]) {
-                                ConstUniformRadio("height", uniform_height);
+                                config.const_height = uniform_height;
                                 for (const input_type of ["image_sample", "image_load"]) {
-                                    SelectDropDown("input_type", input_type);
+                                    config.input_type = input_type;
                                     for (const prefetch of ["none", "workgroup"]) {
-                                        SelectDropDown("prefetch", prefetch);
+                                        config.prefetch = prefetch;
                                         for (const spatial_coeffs of ["inline", "lut_uniform", "lut_const"]) {
-                                            SelectDropDown("spatial_coeffs", spatial_coeffs);
+                                            config.spatial_coeffs = spatial_coeffs;
                                             // Skip invalid configs.
-                                            if (uniform_radius && prefetch !== "none") {
+                                            if (!config.const_radius && config.prefetch !== "none") {
                                                 continue;
                                             }
-                                            UpdateShader(GetShaderConfigFromForm());
+                                            PushShaderConfigToForm(config);
+                                            UpdateShader(config);
                                             // Run the config and check the result.
-                                            if (!(await runner.RunConfig({ config: GetShaderConfigFromForm(), test: true }))) {
+                                            if (!(await runner.RunConfig({
+                                                config,
+                                                iterations: 1,
+                                                test: true,
+                                            })).validated) {
                                                 SetStatus("Config failed!", "#FF0000");
                                                 return;
                                             }
@@ -235,6 +259,114 @@ const Test = async () => {
     const end = performance.now();
     const elapsed = end - start;
     SetRuntime(`Tested ${num_configs} configurations in ${(elapsed / 1000).toFixed(1)} seconds`);
+};
+/// Generate the immediate neighbors of a shader config.
+function GenerateNeighbors(config) {
+    let neighbors = [];
+    // Push a config to the neighbor list, if valid.
+    function Push(new_config) {
+        // Skip invalid configs.
+        if (!new_config.const_radius && new_config.prefetch !== "none") {
+            return;
+        }
+        if (new_config.wgsize_x * new_config.wgsize_y < 8) {
+            return;
+        }
+        neighbors.push(new_config);
+    }
+    // Mutate a boolean parameter.
+    function MutateBool(param) {
+        let result = Object.assign({}, config);
+        result[param] = !result[param];
+        Push(result);
+    }
+    // Mutate an enum parameter.
+    function MutateEnum(param, values) {
+        for (const v of values) {
+            if (config[param] === v) {
+                continue;
+            }
+            let result = Object.assign({}, config);
+            result[param] = v;
+            Push(result);
+        }
+    }
+    // Mutate a power-of-2 parameter.
+    function MutatePow2(param, max) {
+        if (config[param] > 1) {
+            let result = Object.assign({}, config);
+            result[param] /= 2;
+            Push(result);
+        }
+        if (config[param] < max) {
+            let result = Object.assign({}, config);
+            result[param] *= 2;
+            Push(result);
+        }
+    }
+    MutateBool("const_sigma_domain");
+    MutateBool("const_sigma_range");
+    MutateBool("const_radius");
+    MutateBool("const_width");
+    MutateBool("const_height");
+    MutateEnum("input_type", ["image_sample", "image_load"]);
+    MutateEnum("prefetch", ["none", "workgroup"]);
+    MutateEnum("spatial_coeffs", ["inline", "lut_uniform", "lut_const"]);
+    MutatePow2("tilesize_x", 16);
+    MutatePow2("tilesize_y", 16);
+    MutatePow2("wgsize_x", 256);
+    MutatePow2("wgsize_y", 256);
+    return neighbors;
+}
+/// Run the tuning process.
+const Tune = async () => {
+    const old_status_callback = runner.UpdateStatusCallback;
+    const old_runtime_callback = runner.UpdateRuntimeCallback;
+    runner.UpdateStatusCallback = () => { };
+    runner.UpdateRuntimeCallback = () => { };
+    SetStatus("");
+    SetRuntime("");
+    const iterations = +document.getElementById("tune_iterations").value;
+    // Run a config and return the achieved FPS.
+    async function Run(config) {
+        const result = await runner.RunConfig({ config, iterations, test: false });
+        if (!result.validated) {
+            console.log(`Config failed: ${config}`);
+            return null;
+        }
+        return result.fps;
+    }
+    let current_config = GetShaderConfigFromForm();
+    let current_fps = await Run(current_config);
+    SetRuntime(`Initial FPS = ${current_fps.toFixed(1)}`);
+    let rounds = 1;
+    while (true) {
+        let new_best_config = null;
+        let neighbors = GenerateNeighbors(current_config);
+        for (var c = 0; c < neighbors.length; c++) {
+            const n = neighbors[c];
+            SetStatus(`Round ${rounds} (config ${c + 1}/${neighbors.length})`);
+            PushShaderConfigToForm(n);
+            UpdateShader(n);
+            // Run the config.
+            const fps = await Run(n);
+            if (fps > current_fps) {
+                new_best_config = Object.assign({}, n);
+                current_fps = fps;
+                SetRuntime(`Current best: ${current_fps.toFixed(1)} FPS`);
+            }
+        }
+        if (!new_best_config) {
+            break;
+        }
+        current_config = Object.assign({}, new_best_config);
+        rounds++;
+    }
+    SetStatus(`Tuning finished after ${rounds} rounds`);
+    SetRuntime(`Best performance: ${current_fps.toFixed(1)} FPS`);
+    PushShaderConfigToForm(current_config);
+    runner.UpdateStatusCallback = old_status_callback;
+    runner.UpdateRuntimeCallback = old_runtime_callback;
 };
 /// Update and display the WGSL shader.
 function UpdateShader(config) {
@@ -254,6 +386,7 @@ UpdateShader(GetShaderConfigFromForm());
 // Add event handlers for the buttons.
 document.querySelector("#run").addEventListener("click", Run);
 document.querySelector("#test").addEventListener("click", Test);
+document.querySelector("#tune").addEventListener("click", Tune);
 // Add an event handler for the power preference selector.
 document.querySelector("#powerpref").addEventListener("change", () => {
     InitWebGPU().then(() => {
