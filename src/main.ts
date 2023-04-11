@@ -246,15 +246,15 @@ const Test = async () => {
     for (const tile_height of ["1", "2"]) {
       config.tilesize_y = +tile_height;
       for (const uniform_sigma_domain of [true, false]) {
-        config.const_sigma_domain = uniform_sigma_domain;
+        config.const_sigma_domain = !uniform_sigma_domain;
         for (const uniform_sigma_range of [true, false]) {
-          config.const_sigma_range = uniform_sigma_range;
+          config.const_sigma_range = !uniform_sigma_range;
           for (const uniform_radius of [true, false]) {
-            config.const_radius = uniform_radius;
+            config.const_radius = !uniform_radius;
             for (const uniform_width of [true, false]) {
-              config.const_width = uniform_width;
+              config.const_width = !uniform_width;
               for (const uniform_height of [true, false]) {
-                config.const_height = uniform_height;
+                config.const_height = !uniform_height;
                 for (const input_type of ["image_sample", "image_load"]) {
                   config.input_type = input_type;
                   for (const prefetch of ["none", "workgroup"]) {
