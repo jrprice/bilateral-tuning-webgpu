@@ -19,6 +19,12 @@ interface ShaderConfig {
   spatial_coeffs: string;
 }
 
+/// A Result object represents the result of running a config.
+interface Result {
+  fps: number;
+  validated: boolean;
+}
+
 /// A class used to benchmark and test different shader configurations.
 class ConfigRunner {
   // The WebGPU device.
@@ -128,7 +134,11 @@ class ConfigRunner {
   }
 
   /// Run the filter for a specific shader config.
-  async RunConfig(params: { config: ShaderConfig; test?: boolean }): Promise<boolean> {
+  async RunConfig(params: {
+    config: ShaderConfig;
+    iterations: number;
+    test?: boolean;
+  }): Promise<Result> {
     this.UpdateStatus("Setting up...");
 
     const config = params.config;
@@ -256,22 +266,29 @@ class ConfigRunner {
     Enqueue(1);
     await this.device.queue.onSubmittedWorkDone();
 
+    let fps = 0;
     if (!params.test) {
       // Timed runs.
       this.UpdateStatus("Running...");
-      const itrs = +(<HTMLInputElement>document.getElementById("iterations")).value;
       const start = performance.now();
-      Enqueue(itrs);
+      Enqueue(params.iterations);
       await this.device.queue.onSubmittedWorkDone();
       const end = performance.now();
       const elapsed = end - start;
-      const fps = (itrs / elapsed) * 1000;
+      fps = (params.iterations / elapsed) * 1000;
       this.UpdateRuntime(
         `Elapsed time: ${elapsed.toFixed(2)} ms (${fps.toFixed(2)} frames/second)`
       );
     }
 
-    return this.VerifyResult({ output: this.output_texture, config, quick: params.test });
+    return {
+      fps,
+      validated: await this.VerifyResult({
+        output: this.output_texture,
+        config,
+        quick: params.test,
+      }),
+    };
   }
 
   /// Generate the WGSL shader.

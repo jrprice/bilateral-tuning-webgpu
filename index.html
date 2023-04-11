@@ -66,6 +66,7 @@
       <div id="tab_bar" class="tab_bar">
         <button id="run_tab" onclick="openTab('run')" class="tab_button">Run</button>
         <button id="test_tab" onclick="openTab('test')" class="tab_button">Test</button>
+        <button id="tune_tab" onclick="openTab('tune')" class="tab_button">Tune</button>
       </div>
 
       <div id="run_options" class="tab_content">
@@ -82,9 +83,18 @@
         <button id="test">Test all configs</button>
       </div>
 
+      <div id="tune_options" class="tab_content">
+        <select name="tune_iterations" id="tune_iterations">
+          <option value="100">100 iterations</option>
+          <option value="1000" selected="selected">1000 iterations</option>
+          <option value="10000">10000 iterations</option>
+        </select>
+        <button id="tune">Tune</button>
+      </div>
+
       <script>
         function openTab(name) {
-          for (const tab of ["run", "test"]) {
+          for (const tab of ["run", "test", "tune"]) {
             document.getElementById(`${tab}_options`).style.display =
               name === tab ? "block" : "none";
             document.getElementById(`${tab}_tab`).className =
