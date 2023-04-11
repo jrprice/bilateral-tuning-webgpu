@@ -29,7 +29,16 @@ async function InitWebGPU() {
     adapter = await navigator.gpu.requestAdapter({
         powerPreference: powerpref,
     });
+    if (!adapter) {
+        SetStatus("Failed to create WebGPU adapter!", "#FF0000");
+        document.getElementById("run").disabled = true;
+        throw "Failed to create WebGPU adapter.";
+    }
     device = await adapter.requestDevice();
+    // Create the shader config runner.
+    runner = new ConfigRunner(device);
+    runner.UpdateStatusCallback = SetStatus;
+    runner.UpdateRuntimeCallback = SetRuntime;
 }
 /// Get the texture for the canvas called `id`.
 function GetCanvasTexture(id) {
@@ -238,10 +247,6 @@ function UpdateShader(config) {
 }
 // Initialize WebGPU.
 await InitWebGPU();
-// Create the shader config runner.
-runner = new ConfigRunner(device);
-runner.UpdateStatusCallback = SetStatus;
-runner.UpdateRuntimeCallback = SetRuntime;
 // Load the default input image.
 await LoadInputImage();
 // Display the default shader.
@@ -252,7 +257,6 @@ document.querySelector("#test").addEventListener("click", Test);
 // Add an event handler for the power preference selector.
 document.querySelector("#powerpref").addEventListener("change", () => {
     InitWebGPU().then(() => {
-        runner = new ConfigRunner(device);
         LoadInputImage();
     });
 });
