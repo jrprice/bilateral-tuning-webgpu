@@ -336,6 +336,7 @@ const Tune = async () => {
         }
         return result.fps;
     }
+    SetStatus("Running initial config...");
     let current_config = GetShaderConfigFromForm();
     let current_fps = await Run(current_config);
     SetRuntime(`Initial FPS = ${current_fps.toFixed(1)}`);
