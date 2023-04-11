@@ -37,6 +37,11 @@ async function InitWebGPU() {
   adapter = await navigator.gpu.requestAdapter({
     powerPreference: powerpref as GPUPowerPreference,
   });
+  if (!adapter) {
+    SetStatus("Failed to create WebGPU adapter!", "#FF0000");
+    (<HTMLInputElement>document.getElementById("run")).disabled = true;
+    throw "Failed to create WebGPU adapter.";
+  }
   device = await adapter.requestDevice();
 
   // Create the shader config runner.
